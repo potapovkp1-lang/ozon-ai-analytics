@@ -1,17 +1,19 @@
 import asyncio
 import secrets
 from contextlib import asynccontextmanager
+from datetime import date
 from pathlib import Path
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import Depends, FastAPI, Header, HTTPException, status
-from fastapi.responses import FileResponse
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
+from fastapi.responses import FileResponse, Response
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
+from app.services.costs import parse_cost_csv, template_csv
 from app.services.sync import sync_operational_data
-from app.services.storage import dashboard as get_dashboard, initialise
+from app.services.storage import cost_template_products, dashboard as get_dashboard, import_cost_rows, initialise
 
 ROOT = Path(__file__).resolve().parent.parent
 scheduler = AsyncIOScheduler(timezone=settings.timezone)
@@ -61,17 +63,62 @@ async def health():
 
 
 @app.get("/api/public/dashboard", dependencies=[Depends(dashboard_authorized)])
-async def public_dashboard_data():
+async def public_dashboard_data(
+    days: int = Query(default=30, ge=1, le=3650),
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+):
     """Aggregate shop metrics for the visual dashboard; GPT endpoints stay protected."""
-    return get_dashboard()
+    try:
+        return get_dashboard(days=days, date_from=date_from, date_to=date_to)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
 
 
 @app.get("/api/v1/dashboard", dependencies=[Depends(gpt_authorized)])
-async def dashboard_data():
-    return get_dashboard()
+async def dashboard_data(
+    days: int = Query(default=30, ge=1, le=3650),
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+):
+    try:
+        return get_dashboard(days=days, date_from=date_from, date_to=date_to)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
 
 
 @app.get("/api/v1/brief", dependencies=[Depends(gpt_authorized)])
-async def executive_brief():
-    data = get_dashboard()
-    return {"period_days": data["period_days"], "summary": "Данные Ozon синхронизируются ежедневно.", "kpis": data["kpis"], "actions": data["insights"]}
+async def executive_brief(
+    days: int = Query(default=30, ge=1, le=3650),
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+):
+    try:
+        data = get_dashboard(days=days, date_from=date_from, date_to=date_to)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    return {"period": data["period"], "summary": "Управленческая аналитика Ozon за выбранный период.", "kpis": data["kpis"], "actions": data["insights"], "data_quality": data["data_quality"]}
+
+
+@app.get("/api/admin/costs/template", dependencies=[Depends(dashboard_authorized)])
+async def costs_template():
+    return Response(
+        content=template_csv(cost_template_products()).encode("utf-8"),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="ozon-costs-template.csv"'},
+    )
+
+
+@app.post("/api/admin/costs/import", dependencies=[Depends(dashboard_authorized)])
+async def costs_import(request: Request):
+    raw = await request.body()
+    try:
+        rows = parse_cost_csv(
+            raw,
+            default_purchase_vat=settings.default_purchase_vat_rate,
+            default_sale_vat=settings.default_sale_vat_rate,
+        )
+        imported = import_cost_rows(rows)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    return {"status": "ok", "imported": imported}

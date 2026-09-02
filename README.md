@@ -4,13 +4,16 @@ Private analytics service for an Ozon Seller shop. It collects Seller API and
 Performance API data, calculates operational KPIs and serves a visual dashboard
 and a safe read-only API for a custom GPT Action.
 
-## Included in the first version
+## Included
 
 - Seller API client: products, stocks, FBO/FBS postings and finance reports.
 - Performance API OAuth client, ready for advertising reports.
 - Scheduled collection (hourly operations, daily finance/advertising).
-- KPI layer: revenue, units, average order value, returns, stock cover, CTR,
-  CPC, advertising spend and ROAS.
+- Date filters for 7 days, 30 days or any stored custom period.
+- Orders, realised sales and returns in rubles and units.
+- Ozon finance transactions for commissions, logistics and service charges.
+- Purchase-cost CSV import with historical prices and per-SKU VAT rates.
+- Estimated profit, buyout rate and markup before/after tax.
 - Dashboard with clear green/yellow/red status indicators.
 - Read-only endpoints designed for a ChatGPT GPT Action.
 
@@ -37,5 +40,18 @@ available to GPT; Ozon write operations are deliberately not exposed.
 
 ## Data needed for accurate profit
 
-Ozon provides revenue, fees, logistics, returns and ad spend. Add purchase cost
-per SKU (CSV or a later admin screen) to calculate net profit and margin.
+Ozon provides orders, finance operations, commissions, logistics and returns.
+The dashboard has a **Себестоимость** panel: download its CSV template, fill one
+row per Ozon SKU and upload it back. The required fields are:
+
+- `ozon_sku`: numeric Ozon SKU;
+- `себестоимость_с_ндс`: unit purchase price from the supplier document;
+- `ндс_поставщика`: 0, 10, 20 or 22;
+- `доп_затраты_без_ндс`: packaging, marking and inbound delivery per unit;
+- `ндс_продажи`: VAT rate used when that SKU is sold;
+- `действует_с`: first date for the cost in `YYYY-MM-DD` format.
+
+Add a new row with a new effective date when purchase cost changes. Tax figures
+are management estimates and must be reconciled with supplier invoices, Ozon
+UPDs and the accounting system before filing. The default income-tax rate is
+25%; override `INCOME_TAX_RATE` for a different legal form or tax treatment.

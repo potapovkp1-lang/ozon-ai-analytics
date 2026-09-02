@@ -7,7 +7,7 @@ import asyncio
 import logging
 
 import httpx
-from datetime import date
+from datetime import date, datetime, time, timezone
 
 from app.config import settings
 
@@ -52,4 +52,25 @@ class OzonSellerClient:
             "sort": [{"key": "day", "order": "ASC"}],
             "limit": 1000,
             "offset": 0,
+        })
+
+    async def finance_transactions(
+        self,
+        date_from: date,
+        date_to: date,
+        page: int = 1,
+        page_size: int = 1000,
+    ) -> dict:
+        """Financial operations used for sales, returns and Ozon deductions."""
+        start = datetime.combine(date_from, time.min, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+        end = datetime.combine(date_to, time.max, tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+        return await self.post("/v3/finance/transaction/list", {
+            "filter": {
+                "date": {"from": start, "to": end},
+                "operation_type": [],
+                "posting_number": "",
+                "transaction_type": "all",
+            },
+            "page": page,
+            "page_size": page_size,
         })

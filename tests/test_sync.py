@@ -25,3 +25,19 @@ def test_daily_analytics_requests_day_dimensions():
     asyncio.run(client.daily_analytics(date(2026, 8, 1), date(2026, 8, 2)))
     assert captured["dimensions"] == ["day"]
     assert "dimension" not in captured
+
+
+def test_finance_transactions_request_all_operations():
+    captured = {}
+    client = OzonSellerClient()
+
+    async def fake_post(path, payload):
+        captured["path"] = path
+        captured.update(payload)
+        return {"result": {"operations": [], "page_count": 1}}
+
+    client.post = fake_post
+    asyncio.run(client.finance_transactions(date(2026, 8, 1), date(2026, 8, 31)))
+    assert captured["path"] == "/v3/finance/transaction/list"
+    assert captured["filter"]["transaction_type"] == "all"
+    assert captured["page_size"] == 1000
