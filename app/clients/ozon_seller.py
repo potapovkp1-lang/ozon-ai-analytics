@@ -3,10 +3,15 @@
 Endpoints are intentionally concentrated here so that version changes in Ozon
 documentation can be updated without touching analytics logic.
 """
+import asyncio
+import logging
+
 import httpx
 from datetime import date
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class OzonSellerClient:
@@ -18,9 +23,17 @@ class OzonSellerClient:
 
     async def post(self, path: str, payload: dict) -> dict:
         async with httpx.AsyncClient(timeout=45) as client:
-            response = await client.post(f"{self.base_url}{path}", headers=self.headers, json=payload)
-            response.raise_for_status()
-            return response.json()
+            for attempt in range(3):
+                response = await client.post(f"{self.base_url}{path}", headers=self.headers, json=payload)
+                if response.status_code != 429:
+                    response.raise_for_status()
+                    return response.json()
+                if attempt == 2:
+                    response.raise_for_status()
+                wait_seconds = int(response.headers.get("Retry-After", 60))
+                logger.warning("Ozon rate limit reached; retrying after %s seconds", wait_seconds)
+                await asyncio.sleep(wait_seconds)
+        raise RuntimeError("Ozon API request was not completed")
 
     async def product_list(self, limit: int = 1000) -> dict:
         return await self.post("/v3/product/list", {"filter": {"visibility": "ALL"}, "limit": limit, "last_id": ""})
