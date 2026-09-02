@@ -2,5 +2,11 @@
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Ozon AI Analytics</title><link rel="stylesheet" href="/assets/styles.css"></head>
 <body><main><header><div><p class="eyebrow">OZON SELLER</p><h1>Панель аналитики</h1><p class="sub">Данные появятся автоматически после безопасного подключения API.</p></div><span class="badge">Ожидание синхронизации</span></header>
-<section class="cards"><article><span>Выручка</span><strong>—</strong><small>за выбранный период</small></article><article><span>Заказы</span><strong>—</strong><small>FBO + FBS</small></article><article><span>CTR рекламы</span><strong>—</strong><small>кампании Ozon</small></article><article><span>Товары с риском</span><strong>—</strong><small>остатки и оборачиваемость</small></article></section>
-<section class="grid"><article class="panel"><h2>Продажи и прибыль</h2><div class="chart empty">Первый график будет построен после синхронизации</div></article><article class="panel"><h2>Что проверить сегодня</h2><ul><li>Добавьте новые API-ключи в защищённые переменные.</li><li>Включите синхронизацию данных.</li><li>Загрузите закупочные цены по SKU для расчёта прибыли.</li></ul></article></section></main></body></html>
+<section class="cards" id="cards"><article><span>Выручка</span><strong>—</strong><small>загрузка</small></article><article><span>Заказы</span><strong>—</strong><small>загрузка</small></article><article><span>Отмены</span><strong>—</strong><small>загрузка</small></article></section>
+<section class="grid"><article class="panel"><h2>Продажи за 30 дней</h2><div class="chart empty" id="chart">Данные появятся после первой синхронизации</div></article><article class="panel"><h2>Следующий шаг</h2><ul><li>Проверьте, что сервис запущен.</li><li>Включите синхронизацию Ozon.</li><li>Вернитесь сюда через несколько минут.</li></ul></article></section></main><script>
+const money=v=>new Intl.NumberFormat('ru-RU',{maximumFractionDigits:0}).format(v)+' ₽';
+fetch('/api/public/dashboard').then(r=>r.json()).then(data=>{
+ document.getElementById('cards').innerHTML=data.kpis.map(k=>`<article class="${k.status}"><span>${k.name}</span><strong>${k.unit==='₽'?money(k.value):k.value+' '+k.unit}</strong><small>${k.note}</small></article>`).join('');
+ if(data.series?.length){const max=Math.max(...data.series.map(x=>x.revenue),1);document.getElementById('chart').innerHTML='<div class="bars">'+data.series.map(x=>`<i title="${x.day}: ${money(x.revenue)}" style="height:${Math.max(5,x.revenue/max*100)}%"></i>`).join('')+'</div>';}
+}).catch(()=>{document.getElementById('chart').textContent='Сервис запускается — обновите страницу через минуту.'});
+</script></body></html>
