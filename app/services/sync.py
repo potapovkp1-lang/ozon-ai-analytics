@@ -31,7 +31,12 @@ async def sync_operational_data() -> None:
         logger.info("Ozon sync skipped: configure new credentials and set SYNC_ENABLED=true")
         return
     today = date.today()
-    payload = await OzonSellerClient().daily_analytics(today - timedelta(days=31), today - timedelta(days=1))
+    try:
+        payload = await OzonSellerClient().daily_analytics(today - timedelta(days=31), today - timedelta(days=1))
+    except Exception as error:
+        # Credentials and response contents are intentionally omitted from logs.
+        logger.warning("Ozon analytics sync deferred: %s", type(error).__name__)
+        return
     for item in payload.get("result", {}).get("data", []):
         dimensions = item.get("dimensions", [])
         metrics = item.get("metrics", [])
