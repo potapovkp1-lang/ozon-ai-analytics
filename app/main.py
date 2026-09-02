@@ -9,8 +9,8 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
-from app.services.analytics import snapshot
 from app.services.sync import sync_operational_data
+from app.services.storage import dashboard, initialise
 
 ROOT = Path(__file__).resolve().parent.parent
 scheduler = AsyncIOScheduler(timezone=settings.timezone)
@@ -26,6 +26,8 @@ def gpt_authorized(authorization: str | None = Header(default=None)) -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    if settings.database_url:
+        initialise()
     scheduler.add_job(sync_operational_data, "interval", hours=1, id="operational-sync", replace_existing=True)
     scheduler.start()
     if settings.sync_enabled:
@@ -50,9 +52,10 @@ async def health():
 
 @app.get("/api/v1/dashboard", dependencies=[Depends(gpt_authorized)])
 async def dashboard_data():
-    return snapshot()
+    return dashboard()
 
 
 @app.get("/api/v1/brief", dependencies=[Depends(gpt_authorized)])
 async def executive_brief():
-    return {"period": "not_synced", "summary": "Подключите новые ключи Ozon и включите синхронизацию.", "actions": []}
+    data = dashboard()
+    return {"period_days": data["period_days"], "summary": "Данные Ozon синхронизируются ежедневно.", "kpis": data["kpis"], "actions": data["insights"]}
