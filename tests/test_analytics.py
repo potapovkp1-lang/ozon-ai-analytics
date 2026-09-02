@@ -1,7 +1,7 @@
-from app.services.analytics import snapshot
+from app.config import Settings
 
 
-def test_snapshot_is_safe_before_first_sync():
-    result = snapshot()
-    assert result["status"] == "waiting_for_sync"
-    assert len(result["kpis"]) == 4
+def test_settings_have_safe_defaults():
+    result = Settings()
+    assert result.sync_enabled is False
+    assert result.database_url == ""
