@@ -47,7 +47,7 @@ class OzonSellerClient:
             "date_from": date_from.isoformat(),
             "date_to": date_to.isoformat(),
             "metrics": ["revenue", "ordered_units", "cancellations"],
-            "dimension": ["day"],
+            "dimensions": ["day"],
             "filters": [],
             "sort": [{"key": "day", "order": "ASC"}],
             "limit": 1000,
