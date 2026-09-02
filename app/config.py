@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     ozon_performance_client_id: str = ""
     ozon_performance_client_secret: str = ""
     gpt_action_token: str = ""
+    database_url: str = ""
     sync_enabled: bool = False
     timezone: str = "Europe/Moscow"
 
