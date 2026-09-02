@@ -4,6 +4,7 @@ Endpoints are intentionally concentrated here so that version changes in Ozon
 documentation can be updated without touching analytics logic.
 """
 import httpx
+from datetime import date
 
 from app.config import settings
 
@@ -26,3 +27,16 @@ class OzonSellerClient:
 
     async def stock_list(self, product_ids: list[int]) -> dict:
         return await self.post("/v4/product/info/stocks", {"filter": {"product_id": product_ids}, "limit": 1000})
+
+    async def daily_analytics(self, date_from: date, date_to: date) -> dict:
+        """Daily revenue and order-units series from Seller Analytics API."""
+        return await self.post("/v1/analytics/data", {
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
+            "metrics": ["revenue", "ordered_units", "canceled_units"],
+            "dimension": ["day"],
+            "filters": [],
+            "sort": [{"key": "day", "order": "ASC"}],
+            "limit": 1000,
+            "offset": 0,
+        })
