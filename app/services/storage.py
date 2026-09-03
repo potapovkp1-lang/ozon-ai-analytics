@@ -78,6 +78,15 @@ def initialise() -> None:
                 detail TEXT
             )
         """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS sync_state (
+                source TEXT PRIMARY KEY,
+                state TEXT NOT NULL DEFAULT 'waiting',
+                detail TEXT NOT NULL DEFAULT '',
+                last_attempt_at TIMESTAMPTZ,
+                last_success_at TIMESTAMPTZ
+            )
+        """)
         conn.commit()
 
 
@@ -135,6 +144,32 @@ def finance_has_data() -> bool:
     with connection() as conn, conn.cursor() as cur:
         cur.execute("SELECT EXISTS (SELECT 1 FROM daily_finance) AS present")
         return bool(cur.fetchone()["present"])
+
+
+def finance_earliest_day() -> date | None:
+    """Return the first stored finance day so interrupted backfills can resume."""
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT MIN(day) AS earliest FROM daily_finance")
+        row = cur.fetchone()
+        return row["earliest"] if row else None
+
+
+def set_sync_state(source: str, state: str, detail: str = "", *, success: bool = False) -> None:
+    """Store safe, user-facing sync diagnostics without API payloads or secrets."""
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO sync_state (source, state, detail, last_attempt_at, last_success_at)
+            VALUES (%s, %s, %s, now(), CASE WHEN %s THEN now() ELSE NULL END)
+            ON CONFLICT (source) DO UPDATE SET
+                state = EXCLUDED.state,
+                detail = EXCLUDED.detail,
+                last_attempt_at = now(),
+                last_success_at = CASE
+                    WHEN %s THEN now()
+                    ELSE sync_state.last_success_at
+                END
+        """, (source, state, detail[:300], success, success))
+        conn.commit()
 
 
 def import_cost_rows(rows: Iterable[dict]) -> int:
@@ -301,6 +336,12 @@ def dashboard(days: int = 30, date_from: date | None = None, date_to: date | Non
             ) source
         """)
         availability = cur.fetchone()
+        cur.execute("""
+            SELECT source, state, detail, last_attempt_at, last_success_at
+            FROM sync_state
+            ORDER BY source
+        """)
+        source_rows = cur.fetchall()
 
     movement_units = current["movement_units"]
     coverage = round(current["priced_units"] / movement_units * 100, 1) if movement_units else 0.0
@@ -345,6 +386,7 @@ def dashboard(days: int = 30, date_from: date | None = None, date_to: date | Non
         _card("sales_units", "Продано товаров", current["sales_units"] if finance_ready else None, "шт.", trend_status(current["sales_units"], previous["sales_units"]) if finance_ready else "neutral", _delta_note(current["sales_units"], previous["sales_units"], "По финансовым операциям"), "Количество товаров в операциях реализации Ozon."),
         _card("return_amount", "Возвраты", current["return_amount"] if finance_ready else None, "₽", return_amount_status if finance_ready else "neutral", _delta_note(current["return_amount"], previous["return_amount"], f"Доля возвратов {return_rate:.1f}%"), "Сумма возвратов и сторнированных начислений. Чем меньше, тем лучше."),
         _card("return_units", "Возвращено товаров", current["return_units"] if finance_ready else None, "шт.", return_units_status if finance_ready else "neutral", _delta_note(current["return_units"], previous["return_units"], f"Доля возвратов {return_rate:.1f}%"), "Количество товаров в операциях возврата Ozon."),
+        _card("ozon_fees", "Расходы Ozon", current["ozon_fees"] if finance_ready else None, "₽", "neutral" if not finance_ready else traffic_light(current["ozon_fees"] / net_sales_gross * 100 if net_sales_gross > 0 else None, good=25, warning=40, inverse=True), "Комиссии, логистика и услуги", "Все комиссии, логистика, эквайринг и другие удержания Ozon за период."),
         _card("cogs", "Себестоимость продаж", current["cogs_gross"] if costs_ready else None, "₽", traffic_light(cogs_share, good=50, warning=70, inverse=True), costs_note, "Закупочная стоимость с НДС плюс дополнительные затраты без НДС, с учётом возвратов."),
         _card("net_profit", "Чистая прибыль", net_profit, "₽", traffic_light(net_margin, good=15, warning=5), profit_note, "Расчётная прибыль после расходов Ozon, НДС и налога на прибыль. Требует полной себестоимости."),
         _card("buyout_rate", "Процент выкупа", buyout_rate, "%", traffic_light(buyout_rate, good=80, warning=60), f"Продано за вычетом возвратов: {net_sold_units} шт.", "Проданные товары за вычетом возвратов относительно заказанных единиц."),
@@ -393,6 +435,15 @@ def dashboard(days: int = 30, date_from: date | None = None, date_to: date | Non
             "earliest_date": availability["earliest"].isoformat() if availability and availability["earliest"] else None,
             "latest_date": availability["latest"].isoformat() if availability and availability["latest"] else None,
             "last_sync": availability["last_sync"].isoformat() if availability and availability["last_sync"] else None,
+            "sources": {
+                row["source"]: {
+                    "state": row["state"],
+                    "detail": row["detail"],
+                    "last_attempt_at": row["last_attempt_at"].isoformat() if row["last_attempt_at"] else None,
+                    "last_success_at": row["last_success_at"].isoformat() if row["last_success_at"] else None,
+                }
+                for row in source_rows
+            },
         },
         "insights": insights,
     }

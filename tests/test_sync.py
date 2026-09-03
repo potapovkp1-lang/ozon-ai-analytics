@@ -2,7 +2,7 @@ from datetime import date
 import asyncio
 
 from app.clients.ozon_seller import OzonSellerClient
-from app.services.sync import metric_number, report_day
+from app.services.sync import finance_chunks, metric_number, report_day
 
 
 def test_parse_report_day_from_ozon_dimension():
@@ -41,3 +41,10 @@ def test_finance_transactions_request_all_operations():
     assert captured["path"] == "/v3/finance/transaction/list"
     assert captured["filter"]["transaction_type"] == "all"
     assert captured["page_size"] == 1000
+
+
+def test_finance_backfill_starts_with_newest_period():
+    chunks = finance_chunks(date(2026, 6, 2), date(2026, 9, 2))
+    assert chunks[0] == (date(2026, 8, 3), date(2026, 9, 2))
+    assert chunks[-1][0] == date(2026, 6, 2)
+    assert all((end - start).days <= 30 for start, end in chunks)
