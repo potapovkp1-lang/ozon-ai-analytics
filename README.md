@@ -31,6 +31,13 @@ Create a new **private** repository called `ozon-ai-analytics`, then push this
 folder to its `main` branch. Add the same variables from `.env.example` in the
 repository's Actions/Deployment secrets; do not place them in source code.
 
+## Railway deployment
+
+Production: https://ozon-ai-analytics-production.up.railway.app/
+
+Railway deploys the latest commit from the `main` branch. Keep all Ozon and
+dashboard credentials only in Railway service variables.
+
 ## Custom GPT Action
 
 After the service is deployed at a protected HTTPS domain, use
