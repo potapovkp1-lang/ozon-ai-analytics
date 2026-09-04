@@ -38,7 +38,7 @@ Production: https://ozon-ai-analytics-production.up.railway.app/
 Railway deploys the latest commit from the `main` branch. Keep all Ozon and
 dashboard credentials only in Railway service variables.
 
-<!-- railway-deploy: dashboard-v2-20260903 -->
+<!-- railway-deploy: dashboard-v2-20260904 -->
 
 ## Custom GPT Action
 
