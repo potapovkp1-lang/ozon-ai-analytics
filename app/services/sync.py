@@ -8,7 +8,15 @@ import httpx
 from app.clients.ozon_seller import OzonSellerClient
 from app.config import settings
 from app.services.finance import aggregate_finance_operations
-from app.services.storage import finance_earliest_day, replace_finance_period, set_sync_state, upsert_daily_metric
+from app.services.storage import (
+    finance_earliest_day,
+    finance_needs_sku_backfill,
+    replace_analytics_sku_period,
+    replace_finance_period,
+    replace_inventory_snapshot,
+    set_sync_state,
+    upsert_daily_metric,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +37,12 @@ def report_day(dimension: object) -> date:
     return date.fromisoformat(match.group(0))
 
 
+def dimension_value(dimension: object) -> tuple[str, str]:
+    if isinstance(dimension, dict):
+        return str(dimension.get("id") or ""), str(dimension.get("name") or "")
+    return str(dimension or ""), ""
+
+
 async def sync_operational_data() -> None:
     """Collect analytics and finance independently so one failure cannot hide the other."""
     if not settings.sync_enabled or not settings.ozon_api_key or not settings.ozon_client_id:
@@ -38,6 +52,7 @@ async def sync_operational_data() -> None:
     results = await asyncio.gather(
         sync_analytics_source(OzonSellerClient(), today),
         sync_finance_source(OzonSellerClient(), today),
+        sync_inventory_source(OzonSellerClient()),
         return_exceptions=True,
     )
     for result in results:
@@ -88,16 +103,106 @@ async def sync_analytics_source(client: OzonSellerClient, today: date) -> None:
             imported += 1
         except (TypeError, ValueError, IndexError):
             skipped += 1
-    set_sync_state("analytics", "ready", f"Заказы обновлены: {imported} дней", success=True)
+    sku_imported = 0
+    try:
+        # /v1/analytics/data is limited to one request per minute. Keep a full
+        # minute between the daily series and SKU breakdown to avoid 429 loops.
+        await asyncio.sleep(61)
+        sku_imported = await sync_sku_analytics(client, today - timedelta(days=90), today - timedelta(days=1))
+    except Exception as error:
+        logger.warning("Ozon SKU analytics sync deferred: %s", type(error).__name__)
+    set_sync_state("analytics", "ready", f"Заказы: {imported} дней, детализация: {sku_imported} строк", success=True)
     if skipped:
         logger.warning("Skipped %s analytics rows with unexpected Ozon format", skipped)
     logger.info("Ozon analytics sync completed")
 
 
+async def sync_sku_analytics(client: OzonSellerClient, date_from: date, date_to: date) -> int:
+    offset = 0
+    rows: list[dict] = []
+    while True:
+        payload = await client.sku_analytics(date_from, date_to, offset=offset)
+        data = payload.get("result", {}).get("data", [])
+        for item in data:
+            dimensions = item.get("dimensions") or []
+            metrics = item.get("metrics") or []
+            if len(dimensions) < 2:
+                continue
+            try:
+                day = report_day(dimensions[0])
+                sku, name = dimension_value(dimensions[1])
+                if not sku:
+                    continue
+                rows.append({
+                    "day": day,
+                    "ozon_sku": sku,
+                    "product_name": name,
+                    "ordered_amount": metric_number(metrics[0]) if len(metrics) > 0 else 0,
+                    "ordered_units": int(metric_number(metrics[1])) if len(metrics) > 1 else 0,
+                    "canceled_units": int(metric_number(metrics[2])) if len(metrics) > 2 else 0,
+                })
+            except (TypeError, ValueError, IndexError):
+                continue
+        if len(data) < 1000:
+            break
+        offset += 1000
+        await asyncio.sleep(61)
+    replace_analytics_sku_period(date_from, date_to, rows)
+    return len(rows)
+
+
+def current_price(item: dict) -> float:
+    price = item.get("price") or {}
+    for key in ("marketing_seller_price", "marketing_price", "price", "retail_price"):
+        try:
+            value = float(price.get(key) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return value
+    return 0.0
+
+
+async def sync_inventory_source(client: OzonSellerClient) -> None:
+    set_sync_state("inventory", "syncing", "Загружаем остатки FBO и текущие цены")
+    try:
+        prices: dict[str, float] = {}
+        cursor = ""
+        seen_cursors: set[str] = set()
+        while True:
+            payload = await client.product_prices(cursor=cursor)
+            items = payload.get("items") or []
+            for item in items:
+                offer_id = str(item.get("offer_id") or "")
+                if offer_id:
+                    prices[offer_id] = current_price(item)
+            next_cursor = str(payload.get("cursor") or "")
+            if len(items) < 1000 or not next_cursor or next_cursor in seen_cursors:
+                break
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+
+        stocks: list[dict] = []
+        offset = 0
+        while True:
+            payload = await client.warehouse_stocks(offset=offset)
+            rows = payload.get("result", {}).get("rows", [])
+            stocks.extend(rows)
+            if len(rows) < 1000:
+                break
+            offset += 1000
+        replace_inventory_snapshot(stocks, prices)
+    except Exception as error:
+        set_sync_state("inventory", "error", sync_error_detail(error))
+        logger.warning("Ozon inventory sync deferred: %s", type(error).__name__)
+        return
+    set_sync_state("inventory", "ready", f"Остатки FBO: {len(stocks)} строк", success=True)
+
+
 async def sync_finance_source(client: OzonSellerClient, today: date) -> None:
     desired_from = today - timedelta(days=92)
     earliest = finance_earliest_day()
-    finance_from = desired_from if earliest is None or earliest > desired_from else today - timedelta(days=14)
+    finance_from = desired_from if earliest is None or earliest > desired_from or finance_needs_sku_backfill() else today - timedelta(days=14)
     finance_to = today - timedelta(days=1)
     set_sync_state("finance", "syncing", "Загружаем продажи, возвраты и расходы Ozon")
     try:

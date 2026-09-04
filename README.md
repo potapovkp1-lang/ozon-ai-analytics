@@ -14,6 +14,9 @@ and a safe read-only API for a custom GPT Action.
 - Ozon finance transactions for commissions, logistics and service charges.
 - Purchase-cost CSV import with historical prices and per-SKU VAT rates.
 - Estimated profit, buyout rate and markup before/after tax.
+- ОСНО model: 22% VAT for adult clothing, 10% for children's clothing and 25% income tax.
+- Men's, women's and children's sales with buyout, net profit and markup.
+- FBO stock by Ozon warehouse in units, retail value, cost value and stock share.
 - Dashboard with clear green/yellow/red status indicators.
 - Read-only endpoints designed for a ChatGPT GPT Action.
 
@@ -38,8 +41,6 @@ Production: https://ozon-ai-analytics-production.up.railway.app/
 Railway deploys the latest commit from the `main` branch. Keep all Ozon and
 dashboard credentials only in Railway service variables.
 
-<!-- railway-deploy: dashboard-v2-autodeploy-20260904 -->
-
 ## Custom GPT Action
 
 After the service is deployed at a protected HTTPS domain, use
@@ -54,6 +55,7 @@ The dashboard has a **Себестоимость** panel: download its CSV templ
 row per Ozon SKU and upload it back. The required fields are:
 
 - `ozon_sku`: numeric Ozon SKU;
+- `категория`: `мужское`, `женское` or `детское` (also sets the default sales VAT rate);
 - `себестоимость_с_ндс`: unit purchase price from the supplier document;
 - `ндс_поставщика`: 0, 10, 20 or 22;
 - `доп_затраты_без_ндс`: packaging, marking and inbound delivery per unit;

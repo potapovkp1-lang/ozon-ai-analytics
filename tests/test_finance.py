@@ -1,6 +1,6 @@
 from datetime import date
 
-from app.services.finance import aggregate_finance_operations, traffic_light, vat_part
+from app.services.finance import aggregate_finance_operations, product_group, traffic_light, vat_part
 
 
 def test_aggregate_sales_returns_fees_and_skus():
@@ -30,7 +30,10 @@ def test_aggregate_sales_returns_fees_and_skus():
     assert row["ozon_fees"] == 950
     assert row["sales_units"] == 2
     assert row["return_units"] == 1
-    assert sku_daily[(date(2026, 8, 20), "101")] == {"sales_units": 1, "return_units": 1, "product_name": ""}
+    assert sku_daily[(date(2026, 8, 20), "101")] == {
+        "sales_units": 1, "return_units": 1, "sales_amount": 1500,
+        "return_amount": 1000, "ozon_fees": 550, "product_name": "",
+    }
 
 
 def test_vat_and_traffic_lights():
@@ -39,3 +42,10 @@ def test_vat_and_traffic_lights():
     assert traffic_light(70, good=80, warning=60) == "yellow"
     assert traffic_light(50, good=80, warning=60) == "red"
     assert traffic_light(4, good=5, warning=10, inverse=True) == "green"
+
+
+def test_product_group_prefers_explicit_value_and_avoids_guessing():
+    assert product_group("Куртка детская") == "kids"
+    assert product_group("Платье женское") == "women"
+    assert product_group("Брюки", "мужское") == "men"
+    assert product_group("Брюки") == "unknown"

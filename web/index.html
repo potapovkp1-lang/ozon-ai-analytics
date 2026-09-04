@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>Ozon — аналитика магазина</title>
-  <link rel="stylesheet" href="/assets/styles.css?v=20260903-2">
+  <link rel="stylesheet" href="/assets/styles.css?v=20260904-3">
 </head>
 <body>
   <main class="page">
@@ -41,6 +41,13 @@
       <div class="quality-item loading-state"><i></i><div><b>Заказы</b><span>Проверяем данные</span></div></div>
       <div class="quality-item loading-state"><i></i><div><b>Продажи и возвраты</b><span>Проверяем данные</span></div></div>
       <div class="quality-item loading-state"><i></i><div><b>Прибыль</b><span>Проверяем себестоимость</span></div></div>
+    </section>
+
+    <section class="tax-policy" aria-label="Параметры налогового расчёта">
+      <div><span>Компания</span><b>ООО · ОСНО</b></div>
+      <div><span>НДС · взрослая одежда</span><b id="adultVat">22%</b></div>
+      <div><span>НДС · детская одежда</span><b id="kidsVat">10%</b></div>
+      <div><span>Налог на прибыль</span><b id="incomeTaxRate">25%</b></div>
     </section>
 
     <section class="dashboard-section main-section">
@@ -86,6 +93,14 @@
       <div class="metric-grid economy-grid" id="economyCards"></div>
     </section>
 
+    <section class="dashboard-section">
+      <div class="section-heading compact-heading">
+        <div><p class="overline">КАТЕГОРИИ</p><h2>Мужское, женское и детское</h2></div>
+        <p>Продажи, доля, выкуп, себестоимость и наценка после налогов</p>
+      </div>
+      <div class="category-grid" id="categoryGrid"><div class="loading">Собираем аналитику по товарам…</div></div>
+    </section>
+
     <section class="content-grid lower-grid">
       <article class="panel insight-panel">
         <div class="panel-title"><div><p class="overline">AI-АНАЛИТИКА</p><h2>Что требует внимания</h2><p>Короткие выводы по показателям</p></div></div>
@@ -109,6 +124,7 @@
               <tbody>
                 <tr><td>ozon_sku</td><td>Числовой SKU Ozon — обязательное поле</td></tr>
                 <tr><td>артикул</td><td>Ваш внутренний артикул</td></tr>
+                <tr><td>категория</td><td>мужское, женское или детское — определяет раздел аналитики и ставку НДС</td></tr>
                 <tr><td>себестоимость_с_ндс</td><td>Цена закупки одной единицы по документам поставщика</td></tr>
                 <tr><td>ндс_поставщика</td><td>0, 10, 20 или 22 — ставка во входящем документе</td></tr>
                 <tr><td>доп_затраты_без_ндс</td><td>Доставка, маркировка и упаковка на единицу</td></tr>
@@ -121,6 +137,23 @@
       </article>
     </section>
 
+    <section class="dashboard-section warehouse-section">
+      <div class="section-heading compact-heading">
+        <div><p class="overline">ОСТАТКИ FBO</p><h2>Товары на складах Ozon</h2></div>
+        <p id="warehouseUpdated">Текущий снимок складских остатков</p>
+      </div>
+      <article class="panel warehouse-panel">
+        <div class="warehouse-summary" id="warehouseSummary"></div>
+        <div class="warehouse-table-wrap">
+          <table class="warehouse-table">
+            <thead><tr><th>Склад Ozon</th><th>В наличии</th><th>В резерве</th><th>По розничной цене</th><th>Себестоимость</th><th>Доля остатка</th></tr></thead>
+            <tbody id="warehouseRows"><tr><td colspan="6" class="table-empty">Загружаем остатки…</td></tr></tbody>
+          </table>
+        </div>
+        <p class="tax-note">Розничная сумма считается по текущей цене товара в Ozon. Себестоимость появится после заполнения CSV.</p>
+      </article>
+    </section>
+
     <footer><span>Ozon AI Analytics</span><span>Автоматическое обновление каждый час</span></footer>
   </main>
   <div class="toast" id="toast" role="status"></div>
@@ -128,6 +161,7 @@
 <script>
 const money = value => value == null ? '—' : new Intl.NumberFormat('ru-RU', {maximumFractionDigits: 0}).format(value) + ' ₽';
 const number = value => value == null ? '—' : new Intl.NumberFormat('ru-RU', {maximumFractionDigits: 1}).format(value);
+const percent = value => value == null ? '—' : `${number(value)}%`;
 const escapeHtml = value => String(value ?? '').replace(/[&<>'"]/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
 const formatValue = item => item.value == null ? 'Нет данных' : item.unit === '₽' ? money(item.value) : `${number(item.value)} ${item.unit}`;
 const statusLabel = {green:'Хорошо', yellow:'Внимание', red:'Плохо', neutral:'Нет данных'};
@@ -155,7 +189,7 @@ function metricCard(item, primary=false) {
   return `<article class="metric-card ${safeStatus} ${primary ? 'is-primary' : ''}" title="${escapeHtml(item.tooltip)}">
     <div class="metric-top"><span class="metric-icon">${metricIcon[item.key] || '•'}</span><span class="status-pill"><i></i>${statusLabel[safeStatus]}</span></div>
     <span class="metric-name">${escapeHtml(item.name)}</span>
-    <strong>${formatValue(item)}</strong>
+    <div class="metric-value-row"><strong>${formatValue(item)}</strong>${item.unit === '₽' && item.percent != null ? `<span class="metric-percent" title="${escapeHtml(item.percent_label)}">${item.percent > 0 && item.percent_label === 'к прошлому периоду' ? '+' : ''}${percent(item.percent)}</span>` : ''}</div>
     <small>${escapeHtml(item.note)}</small>
   </article>`;
 }
@@ -180,13 +214,43 @@ function breakdownRows(values) {
   const rows=[
     ['Продажи минус возвраты', values.net_sales_gross, 'positive'],
     ['Исходящий НДС', values.output_vat, 'negative'],
+    ['Входящий НДС по товару', values.input_vat_cogs, 'positive'],
+    ['Входящий НДС по услугам Ozon', values.input_vat_ozon, 'positive'],
+    ['НДС к уплате (оценка)', values.vat_payable, 'subtotal'],
     ['Комиссии и услуги Ozon', values.ozon_fees, 'negative'],
     ['Себестоимость без входящего НДС', values.cogs_net, 'negative'],
     ['Прибыль до налога', values.profit_before_tax, 'subtotal'],
     ['Налог на прибыль', values.income_tax, 'negative'],
     ['Чистая прибыль', values.net_profit, 'total'],
   ];
-  return rows.map(([label,value,type])=>`<div class="breakdown-row ${type} ${value == null ? 'missing' : ''}"><span>${label}</span><b>${money(value)}</b></div>`).join('');
+  const base=Math.abs(Number(values.net_sales_gross || 0));
+  return rows.map(([label,value,type])=>`<div class="breakdown-row ${type} ${value == null ? 'missing' : ''}"><span>${label}</span><b>${money(value)}${value != null && base ? `<em>${percent(Math.abs(value)/base*100)}</em>` : ''}</b></div>`).join('');
+}
+function categoryCard(item) {
+  const safeStatus=['green','yellow','red','neutral'].includes(item.status) ? item.status : 'neutral';
+  return `<article class="category-card ${safeStatus}">
+    <div class="category-head"><div><span>Категория</span><h3>${escapeHtml(item.name)}</h3></div><b>${percent(item.sales_share_percent)} продаж</b></div>
+    <div class="category-sales"><span>Продажи после возвратов</span><strong>${money(item.net_sales_amount)}</strong><small>${number(item.net_sales_units)} шт.</small></div>
+    <div class="category-stats">
+      <div><span>Заказано</span><b>${money(item.ordered_amount)}</b><small>${number(item.ordered_units)} шт.</small></div>
+      <div><span>Процент выкупа</span><b>${percent(item.buyout_rate)}</b></div>
+      <div><span>Себестоимость</span><b>${money(item.cogs)}</b><small>покрытие ${percent(item.cost_coverage_percent)}</small></div>
+      <div><span>Наценка после налогов</span><b>${percent(item.markup_after_tax)}</b><small>${item.net_profit == null ? 'нужна себестоимость' : `прибыль ${money(item.net_profit)}`}</small></div>
+    </div>
+  </article>`;
+}
+function renderCategories(items=[]) {
+  const target=document.getElementById('categoryGrid');
+  target.innerHTML=items.length ? items.map(categoryCard).join('') : '<div class="empty-state panel"><b>Категории пока не рассчитаны</b><span>Детализация появится после синхронизации заказов по SKU.</span></div>';
+}
+function renderWarehouses(items=[], updatedAt=null) {
+  const body=document.getElementById('warehouseRows');
+  const totalUnits=items.reduce((sum,row)=>sum+Number(row.units||0),0);
+  const totalRetail=items.every(row=>row.retail_value!=null) ? items.reduce((sum,row)=>sum+Number(row.retail_value||0),0) : null;
+  const totalCost=items.every(row=>row.cost_value!=null) ? items.reduce((sum,row)=>sum+Number(row.cost_value||0),0) : null;
+  document.getElementById('warehouseSummary').innerHTML=`<div><span>Всего на FBO</span><b>${number(totalUnits)} шт.</b></div><div><span>Розничная стоимость</span><b>${money(totalRetail)}</b></div><div><span>Себестоимость остатка</span><b>${money(totalCost)}</b></div>`;
+  document.getElementById('warehouseUpdated').textContent=updatedAt ? `Остатки обновлены ${new Date(updatedAt).toLocaleString('ru-RU')}` : 'Ожидаем первую синхронизацию остатков';
+  body.innerHTML=items.length ? items.map(row=>`<tr><td><b>${escapeHtml(row.warehouse_name)}</b></td><td>${number(row.units)} шт.</td><td>${number(row.reserved_units)} шт.</td><td>${money(row.retail_value)}</td><td>${money(row.cost_value)}</td><td><span class="share-bar"><i style="width:${Math.max(0,Math.min(100,Number(row.share_percent||0)))}%"></i></span><b>${percent(row.share_percent)}</b></td></tr>`).join('') : '<tr><td colspan="6" class="table-empty">Остатки FBO появятся после синхронизации Seller API.</td></tr>';
 }
 function qualityItem(title, state, detail) {
   return `<div class="quality-item ${state}"><i></i><div><b>${escapeHtml(title)}</b><span>${escapeHtml(detail)}</span></div></div>`;
@@ -213,6 +277,11 @@ function render(data) {
   document.getElementById('chart').innerHTML = chartSvg(data.series, data.data_quality.finance_ready);
   document.getElementById('chartHint').textContent = data.data_quality.finance_ready ? 'По дням за выбранный период' : 'Продажи появятся после финансовой синхронизации';
   document.getElementById('breakdown').innerHTML = breakdownRows(data.breakdown);
+  document.getElementById('adultVat').textContent=percent(data.tax_policy?.adult_vat_rate);
+  document.getElementById('kidsVat').textContent=percent(data.tax_policy?.kids_vat_rate);
+  document.getElementById('incomeTaxRate').textContent=percent(data.tax_policy?.income_tax_rate);
+  renderCategories(data.categories);
+  renderWarehouses(data.warehouses, data.data_quality?.inventory_updated_at);
   document.getElementById('insights').innerHTML = data.insights.map(item=>`<div class="insight ${item.status}"><i></i><div><b>${escapeHtml(item.title)}</b><p>${escapeHtml(item.text)}</p></div></div>`).join('');
   const coverage=Math.max(0,Math.min(100,Number(data.data_quality.cost_coverage_percent || 0)));
   document.getElementById('coverage').textContent = `${number(coverage)}%`;

@@ -54,6 +54,40 @@ class OzonSellerClient:
             "offset": 0,
         })
 
+    async def sku_analytics(self, date_from: date, date_to: date, offset: int = 0) -> dict:
+        """Orders grouped by day and Ozon SKU for category reporting."""
+        return await self.post("/v1/analytics/data", {
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
+            "metrics": ["revenue", "ordered_units", "cancellations"],
+            "dimensions": ["day", "sku"],
+            "filters": [],
+            "sort": [{"key": "day", "order": "ASC"}],
+            "limit": 1000,
+            "offset": offset,
+        })
+
+    async def warehouse_stocks(self, limit: int = 1000, offset: int = 0) -> dict:
+        """FBO stock by Ozon warehouse.
+
+        Ozon currently recommends /v1/analytics/stocks, but its request needs a
+        preselected SKU list. This report remains the reliable all-SKU source;
+        the parser is isolated so it can be replaced without touching storage.
+        """
+        return await self.post("/v2/analytics/stock_on_warehouses", {
+            "limit": limit,
+            "offset": offset,
+            "warehouse_type": "FULFILLMENT",
+        })
+
+    async def product_prices(self, cursor: str = "", limit: int = 1000) -> dict:
+        """Current prices used to value FBO stock at the Ozon selling price."""
+        return await self.post("/v5/product/info/prices", {
+            "cursor": cursor,
+            "filter": {"offer_id": [], "product_id": [], "visibility": "ALL"},
+            "limit": limit,
+        })
+
     async def finance_transactions(
         self,
         date_from: date,

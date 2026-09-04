@@ -5,9 +5,11 @@ import csv
 import io
 from datetime import date
 
+from app.services.finance import product_group
+
 
 HEADERS = [
-    "ozon_sku", "артикул", "название", "себестоимость_с_ндс",
+    "ozon_sku", "артикул", "название", "категория", "себестоимость_с_ндс",
     "ндс_поставщика", "доп_затраты_без_ндс", "ндс_продажи", "действует_с",
 ]
 
@@ -15,6 +17,7 @@ ALIASES = {
     "ozon_sku": ("ozon_sku", "sku_ozon", "sku"),
     "offer_id": ("offer_id", "артикул"),
     "product_name": ("product_name", "название"),
+    "product_group": ("product_group", "категория", "группа"),
     "purchase_cost_with_vat": ("purchase_cost_with_vat", "себестоимость_с_ндс"),
     "purchase_vat_rate": ("purchase_vat_rate", "ндс_поставщика"),
     "extra_cost_without_vat": ("extra_cost_without_vat", "доп_затраты_без_ндс"),
@@ -29,12 +32,16 @@ def template_csv(products: list[dict] | None = None) -> str:
     writer.writerow(HEADERS)
     if products:
         for product in products:
+            group_key = product_group(product.get("product_name") or "", product.get("product_group") or "")
+            group_label = {"men": "мужское", "women": "женское", "kids": "детское"}.get(group_key, "")
+            default_sale_vat = 10 if group_key == "kids" else 22
             writer.writerow([
                 product["ozon_sku"], product.get("offer_id") or "", product.get("product_name") or "",
+                group_label,
                 product.get("purchase_cost_with_vat") or "",
                 product.get("purchase_vat_rate") if product.get("purchase_vat_rate") is not None else "22",
                 product.get("extra_cost_without_vat") if product.get("extra_cost_without_vat") is not None else "0",
-                product.get("sale_vat_rate") if product.get("sale_vat_rate") is not None else "22",
+                product.get("sale_vat_rate") if product.get("sale_vat_rate") is not None else str(default_sale_vat),
                 product.get("valid_from") or date.today().replace(month=1, day=1),
             ])
     return "\ufeff" + buffer.getvalue()
@@ -89,6 +96,10 @@ def parse_cost_csv(raw: bytes, *, default_purchase_vat: float = 22, default_sale
         sale_vat = _decimal(_value(source, "sale_vat_rate"), "ндс_продажи", row_number, default=default_sale_vat)
         if purchase_vat not in {0, 10, 20, 22} or sale_vat not in {0, 10, 20, 22}:
             raise ValueError(f"Строка {row_number}: ставка НДС должна быть 0, 10, 20 или 22")
+        group = _value(source, "product_group").lower()
+        allowed_groups = {"", "мужское", "мужской", "женское", "женский", "детское", "детский", "men", "women", "kids"}
+        if group not in allowed_groups:
+            raise ValueError(f"Строка {row_number}: категория должна быть мужское, женское или детское")
         valid_raw = _value(source, "valid_from")
         try:
             valid_from = date.fromisoformat(valid_raw)
@@ -98,6 +109,7 @@ def parse_cost_csv(raw: bytes, *, default_purchase_vat: float = 22, default_sale
             "ozon_sku": sku,
             "offer_id": _value(source, "offer_id"),
             "product_name": _value(source, "product_name"),
+            "product_group": group,
             "purchase_cost_with_vat": purchase_cost,
             "purchase_vat_rate": purchase_vat,
             "extra_cost_without_vat": _decimal(_value(source, "extra_cost_without_vat"), "доп_затраты_без_ндс", row_number, default=0),
