@@ -323,10 +323,10 @@ function renderPhoto(data) {
   const totals=data.totals||{};
   const noTraffic=!data.data_available;
   document.getElementById('photoSummary').innerHTML=[
-    ['Просмотры карточек',noTraffic?'Нет данных':number(totals.views),noTraffic?'Нужен доступ Ozon Premium':'За выбранный период'],
+    ['Просмотры карточек',noTraffic?'Нет данных':number(totals.views),noTraffic?'Метрики Premium Plus ещё синхронизируются':'За выбранный период'],
     ['CTR',percent(totals.ctr),noTraffic?'Ozon не передал метрику':'Переходы из поиска и каталога'],
     ['Карточка → корзина',percent(totals.card_to_cart),noTraffic?'Ozon не передал метрику':'Добавили после просмотра'],
-    ['Заказ → выкуп',percent(totals.order_to_buyout),`${number(totals.retained_units)} из ${number(totals.ordered_units)} шт.`],
+    ['Заказ → выкуп',percent(totals.order_to_buyout),`${number(totals.sold_units)} продано из ${number(totals.ordered_units)} заказанных`],
   ].map(([label,value,note])=>`<div><span>${label}</span><b>${value}</b><small>${note}</small></div>`).join('');
   const body=document.getElementById('photoRows');
   body.innerHTML=data.rows?.length ? data.rows.map(row=>`<tr>
