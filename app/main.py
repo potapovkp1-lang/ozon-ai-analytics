@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import secrets
 from contextlib import asynccontextmanager
 from datetime import date
@@ -19,7 +18,6 @@ from app.services.storage import cost_template_products, dashboard as get_dashbo
 ROOT = Path(__file__).resolve().parent.parent
 scheduler = AsyncIOScheduler(timezone=settings.timezone)
 basic_auth = HTTPBasic()
-DIAGNOSTIC_TOKEN_HASH = "4dc79e305b0b0c215456b2f085678522acede17c2d5b5a35a050a29c423fc722"
 
 def gpt_authorized(authorization: str | None = Header(default=None)) -> None:
     if not settings.gpt_action_token:
@@ -125,22 +123,3 @@ async def costs_import(request: Request):
     return {"status": "ok", "imported": imported}
 
 
-
-@app.get("/api/admin/diagnose-once", include_in_schema=False)
-async def diagnose_once(x_diagnostic_token: str | None = Header(default=None)):
-    supplied_hash = hashlib.sha256((x_diagnostic_token or "").encode()).hexdigest()
-    if not secrets.compare_digest(supplied_hash, DIAGNOSTIC_TOKEN_HASH):
-        raise HTTPException(404, "Not found")
-    data = get_dashboard(days=30)
-    return {
-        "status": data["status"],
-        "kpis": {item["key"]: {"value": item["value"], "note": item["note"]} for item in data["kpis"]},
-        "data_quality": data["data_quality"],
-        "categories": data["categories"],
-        "warehouse_count": len(data["warehouses"]),
-        "warehouse_cost_coverage": [
-            {"warehouse": item["warehouse_name"], "coverage": item["cost_coverage_percent"], "missing": item["missing_cost_units"]}
-            for item in data["warehouses"]
-        ],
-        "ozon_expenses": data["ozon_expenses"],
-    }
