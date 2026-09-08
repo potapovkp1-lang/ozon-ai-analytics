@@ -104,3 +104,30 @@ def test_buyout_percent_is_net_sold_relative_to_ordered_units():
     assert buyout_percent(100, 82, 7) == 75
     assert buyout_percent(100, 10, 20) == 0
     assert buyout_percent(0, 10, 0) is None
+
+
+def test_finance_units_are_counted_once_per_posting_and_sku():
+    operations = [
+        {
+            "operation_id": 1,
+            "operation_date": "2026-09-01T10:00:00Z",
+            "type": "returns",
+            "operation_type_name": "Возврат товара",
+            "accruals_for_sale": -2000,
+            "amount": -2000,
+            "posting": {"posting_number": "POST-1"},
+            "items": [{"sku": 101, "name": "Брюки"}],
+        },
+        {
+            "operation_id": 2,
+            "operation_date": "2026-09-01T10:01:00Z",
+            "type": "returns",
+            "operation_type_name": "Обратная логистика",
+            "amount": -300,
+            "posting": {"posting_number": "POST-1"},
+            "items": [{"sku": 101, "name": "Брюки"}],
+        },
+    ]
+    daily, sku_daily = aggregate_finance_operations(operations)
+    assert daily[date(2026, 9, 1)]["return_units"] == 1
+    assert sku_daily[(date(2026, 9, 1), "101")]["return_units"] == 1
