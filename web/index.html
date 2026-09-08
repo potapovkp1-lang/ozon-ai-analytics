@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>Ozon — аналитика магазина</title>
-  <link rel="stylesheet" href="/assets/styles.css?v=20260908-1">
+  <link rel="stylesheet" href="/assets/styles.css?v=20260908-2">
 </head>
 <body>
   <main class="page">
@@ -95,6 +95,11 @@
         <div class="panel-title"><div><p class="overline">РАСХОДЫ OZON</p><h2>Из чего состоят удержания</h2><p>Сумма и доля от продаж после возвратов</p></div></div>
         <div class="expense-list" id="expenseList"><div class="loading">Разбираем расходы по видам…</div></div>
       </article>
+      <article class="panel financing-panel">
+        <div class="panel-title"><div><p class="overline">ФИНАНСИРОВАНИЕ</p><h2>Займы и факторинг</h2><p>Показаны отдельно и не уменьшают операционную прибыль</p></div></div>
+        <div class="financing-grid" id="financingGrid"><div class="loading">Проверяем движения…</div></div>
+        <p class="tax-note">Плюс означает получение денег, минус — погашение. Эти суммы не входят в карточку «Расходы Ozon».</p>
+      </article>
     </section>
 
     <section class="dashboard-section">
@@ -158,6 +163,42 @@
       </article>
     </section>
 
+    <section class="dashboard-section photo-section" id="photoAnalytics">
+      <div class="section-heading compact-heading">
+        <div><p class="overline">РАБОТА С ФОТО</p><h2>Воронка карточек товаров</h2></div>
+        <p>От показов в поиске до выкупа — по каждому артикулу и размеру</p>
+      </div>
+      <article class="panel photo-panel">
+        <div class="photo-toolbar">
+          <div class="photo-quick-filters" aria-label="Период фото-аналитики">
+            <button class="photo-period-button" data-photo-days="7">7 дней</button>
+            <button class="photo-period-button active" data-photo-days="30">30 дней</button>
+          </div>
+          <label class="photo-date"><span>С даты</span><input type="date" id="photoDateFrom"></label>
+          <label class="photo-date"><span>По дату</span><input type="date" id="photoDateTo"></label>
+          <label class="article-search"><span>Артикул или SKU</span><input type="search" id="photoSearch" placeholder="Например, 12345 или SKU" autocomplete="off"></label>
+          <button class="primary-button" id="photoApply" type="button">Показать</button>
+          <a class="secondary-button" id="photoExport" href="/api/public/photo-analytics.csv?days=30">Выгрузить CSV</a>
+        </div>
+        <div class="photo-summary" id="photoSummary">
+          <div class="summary-skeleton"></div><div class="summary-skeleton"></div>
+          <div class="summary-skeleton"></div><div class="summary-skeleton"></div>
+        </div>
+        <div class="photo-status" id="photoStatus">Загружаем воронку карточек…</div>
+        <div class="photo-table-wrap">
+          <table class="photo-table">
+            <thead><tr>
+              <th>Артикул / SKU</th><th>Размер</th><th>ШК</th><th>Просмотры</th><th>CTR</th>
+              <th>Поиск/каталог → карточка</th><th>Карточка → избранное</th>
+              <th>Карточка → корзина</th><th>Корзина → заказ</th><th>Заказ → выкуп</th>
+            </tr></thead>
+            <tbody id="photoRows"><tr><td colspan="10" class="table-empty">Загружаем данные…</td></tr></tbody>
+          </table>
+        </div>
+        <p class="tax-note">CTR здесь — переходы в карточку относительно показов в поиске и каталоге. Метрика «в избранное» оставлена отдельной и не подменяется другой: Seller API Ozon её не передаёт.</p>
+      </article>
+    </section>
+
     <footer><span>Ozon AI Analytics</span><span>Автоматическое обновление каждый час</span></footer>
   </main>
   <div class="toast" id="toast" role="status"></div>
@@ -171,6 +212,7 @@ const formatValue = item => item.value == null ? 'Нет данных' : item.un
 const statusLabel = {green:'Хорошо', yellow:'Внимание', red:'Плохо', neutral:'Нет данных'};
 const metricIcon = {ordered_amount:'₽',sales_amount:'₽',net_profit:'₽',buyout_rate:'%',ordered_units:'шт',sales_units:'шт',return_amount:'↩',return_units:'↩',ozon_fees:'₽',cogs:'₽',markup_before_tax:'%',markup_after_tax:'%'};
 let currentQuery = 'days=30';
+let currentPhotoQuery = 'days=30';
 
 function localDate(date) {
   const shifted = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
@@ -181,6 +223,12 @@ function setDates(days) {
   const start = new Date(end); start.setDate(start.getDate() - days + 1);
   document.getElementById('dateFrom').value = localDate(start);
   document.getElementById('dateTo').value = localDate(end);
+}
+function setPhotoDates(days) {
+  const end = new Date(); end.setDate(end.getDate() - 1);
+  const start = new Date(end); start.setDate(start.getDate() - days + 1);
+  document.getElementById('photoDateFrom').value = localDate(start);
+  document.getElementById('photoDateTo').value = localDate(end);
 }
 function showToast(message, error=false) {
   const toast = document.getElementById('toast');
@@ -256,6 +304,55 @@ function renderExpenses(items=[]) {
     return `<div class="expense-row"><div class="expense-label"><span>${escapeHtml(item.name)}</span><b>${money(item.value)} <em>${percent(item.share_percent)}</em></b></div><div class="expense-track"><i style="width:${width}%"></i></div></div>`;
   }).join('') : '<div class="empty-state compact-empty"><b>Детализация появится после пересинхронизации</b><span>Общая сумма расходов уже учитывается в прибыли.</span></div>';
 }
+function renderFinancing(items=[]) {
+  document.getElementById('financingGrid').innerHTML=items.map(item=>{
+    const value=Number(item.value||0);
+    const movement=item.direction==='inflow' ? 'Чистое получение' : item.direction==='outflow' ? 'Чистое погашение' : 'Движений не было';
+    return `<div class="financing-item ${escapeHtml(item.direction)}"><span>${escapeHtml(item.name)}</span><b>${value>0?'+':''}${money(value)}</b><small>${movement}</small></div>`;
+  }).join('') || '<div class="empty-state compact-empty"><b>Движений не было</b><span>За выбранный период займы и факторинг не найдены.</span></div>';
+}
+
+function funnelTone(value, good, warning) {
+  if(value==null)return 'neutral';
+  return Number(value)>=good ? 'good' : Number(value)>=warning ? 'warning' : 'bad';
+}
+function funnelCell(value, good, warning, empty='—') {
+  return value==null ? `<span class="funnel-value neutral">${empty}</span>` : `<span class="funnel-value ${funnelTone(value,good,warning)}">${percent(value)}</span>`;
+}
+function renderPhoto(data) {
+  const totals=data.totals||{};
+  document.getElementById('photoSummary').innerHTML=[
+    ['Просмотры карточек',number(totals.views),'За выбранный период'],
+    ['CTR',percent(totals.ctr),'Переходы из поиска и каталога'],
+    ['Карточка → корзина',percent(totals.card_to_cart),'Добавили после просмотра'],
+    ['Заказ → выкуп',percent(totals.order_to_buyout),`${number(totals.retained_units)} из ${number(totals.ordered_units)} шт.`],
+  ].map(([label,value,note])=>`<div><span>${label}</span><b>${value}</b><small>${note}</small></div>`).join('');
+  const body=document.getElementById('photoRows');
+  body.innerHTML=data.rows?.length ? data.rows.map(row=>`<tr>
+    <td><b>${escapeHtml(row.offer_id)}</b><small>SKU ${escapeHtml(row.ozon_sku)}${row.product_name?` · ${escapeHtml(row.product_name)}`:''}</small></td>
+    <td>${escapeHtml(row.size||'—')}</td><td>${escapeHtml(row.barcode||'—')}</td>
+    <td><b>${number(row.views)}</b><small>${number(row.search_catalog_impressions)} показов</small></td>
+    <td>${funnelCell(row.ctr,5,2)}</td>
+    <td>${funnelCell(row.search_catalog_to_card,5,2)}</td>
+    <td>${funnelCell(row.card_to_favorite,1,0.3,'нет данных')}</td>
+    <td>${funnelCell(row.card_to_cart,8,4)}</td>
+    <td>${funnelCell(row.cart_to_order,25,12)}</td>
+    <td>${funnelCell(row.order_to_buyout,70,50)}</td>
+  </tr>`).join('') : '<tr><td colspan="10" class="table-empty">По выбранному артикулу и периоду данных нет.</td></tr>';
+  const status=document.getElementById('photoStatus');
+  status.className=`photo-status ${data.data_available?'ready':'attention'}`;
+  status.textContent=data.data_available ? `Показано товаров: ${data.rows.length} · ${new Date(data.period.date_from+'T00:00:00').toLocaleDateString('ru-RU')}–${new Date(data.period.date_to+'T00:00:00').toLocaleDateString('ru-RU')}` : 'Расширенные показатели появятся после синхронизации Ozon Analytics.';
+}
+async function loadPhotoAnalytics(query=currentPhotoQuery) {
+  currentPhotoQuery=query;
+  document.getElementById('photoExport').href=`/api/public/photo-analytics.csv?${query}`;
+  const status=document.getElementById('photoStatus'); status.className='photo-status'; status.textContent='Обновляем воронку карточек…';
+  try {
+    const response=await fetch(`/api/public/photo-analytics?${query}`,{cache:'no-store'});
+    if(!response.ok){const error=await response.json().catch(()=>({}));throw new Error(error.detail||'Не удалось загрузить фото-аналитику');}
+    renderPhoto(await response.json());
+  } catch(error) {status.className='photo-status attention';status.textContent=error.message;}
+}
 function renderWarehouses(items=[], updatedAt=null) {
   const body=document.getElementById('warehouseRows');
   const totalUnits=items.reduce((sum,row)=>sum+Number(row.units||0),0);
@@ -293,6 +390,7 @@ function render(data) {
   document.getElementById('chartHint').textContent = data.data_quality.finance_ready ? 'По дням за выбранный период' : 'Продажи появятся после финансовой синхронизации';
   document.getElementById('breakdown').innerHTML = breakdownRows(data.breakdown);
   renderExpenses(data.ozon_expenses);
+  renderFinancing(data.financing);
   document.getElementById('adultVat').textContent=percent(data.tax_policy?.adult_vat_rate);
   document.getElementById('kidsVat').textContent=percent(data.tax_policy?.kids_vat_rate);
   document.getElementById('incomeTaxRate').textContent=percent(data.tax_policy?.income_tax_rate);
@@ -344,7 +442,23 @@ document.getElementById('costFile').addEventListener('change',async event=>{
   event.target.value='';
 });
 
-setDates(30); loadDashboard();
+function applyPhotoFilters() {
+  const from=document.getElementById('photoDateFrom').value, to=document.getElementById('photoDateTo').value;
+  if(from>to){showToast('Дата начала фото-аналитики не может быть позже даты окончания',true);return;}
+  document.querySelectorAll('.photo-period-button').forEach(item=>item.classList.remove('active'));
+  const search=document.getElementById('photoSearch').value.trim();
+  loadPhotoAnalytics(`date_from=${encodeURIComponent(from)}&date_to=${encodeURIComponent(to)}&search=${encodeURIComponent(search)}`);
+}
+document.querySelectorAll('.photo-period-button').forEach(button=>button.addEventListener('click',()=>{
+  document.querySelectorAll('.photo-period-button').forEach(item=>item.classList.remove('active'));button.classList.add('active');
+  const days=Number(button.dataset.photoDays);setPhotoDates(days);
+  const search=document.getElementById('photoSearch').value.trim();
+  loadPhotoAnalytics(`days=${days}&search=${encodeURIComponent(search)}`);
+}));
+document.getElementById('photoApply').addEventListener('click',applyPhotoFilters);
+document.getElementById('photoSearch').addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();applyPhotoFilters();}});
+
+setDates(30); setPhotoDates(30); loadDashboard(); loadPhotoAnalytics();
 </script>
 </body>
 </html>
