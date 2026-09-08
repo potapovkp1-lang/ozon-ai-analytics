@@ -255,8 +255,9 @@ def percent_change(current: float, previous: float) -> float | None:
     return round((current - previous) / abs(previous) * 100, 1)
 
 
-def buyout_percent(ordered_units: int, sold_units: int, return_units: int) -> float | None:
-    if ordered_units <= 0:
+def buyout_percent(delivered_units: int, returned_units: int) -> float | None:
+    """Share of delivered units that remained with customers after returns."""
+    if delivered_units <= 0:
         return None
-    net_sold = max(0, sold_units - return_units)
-    return max(0.0, min(100.0, net_sold / ordered_units * 100))
+    purchased_units = max(0, delivered_units - returned_units)
+    return max(0.0, min(100.0, purchased_units / delivered_units * 100))
