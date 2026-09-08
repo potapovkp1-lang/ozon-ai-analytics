@@ -214,7 +214,7 @@ async def sync_finance_source(client: OzonSellerClient, today: date) -> None:
         return
     set_sync_state("finance", "ready", f"Финансовые операции обновлены: {operation_count}", success=True)
     if full_backfill:
-        set_sync_state("finance_units_v2", "ready", "Продажи и возвраты пересчитаны без повторов", success=True)
+        set_sync_state("finance_units_v3", "ready", "Продажи и возвраты пересчитаны без служебных операций", success=True)
 
 
 async def sync_finance_data(client: OzonSellerClient, date_from: date, date_to: date) -> int:
