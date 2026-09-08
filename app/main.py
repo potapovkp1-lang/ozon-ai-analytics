@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import secrets
 from contextlib import asynccontextmanager
 from datetime import date
@@ -19,7 +18,6 @@ from app.services.storage import cost_template_products, dashboard as get_dashbo
 ROOT = Path(__file__).resolve().parent.parent
 scheduler = AsyncIOScheduler(timezone=settings.timezone)
 basic_auth = HTTPBasic()
-BUYOUT_CHECK_TOKEN_HASH = "0ccb05b4bf8f50f0323876b36f1c5d90ff77e901737b639378d66a83b83b3e43"
 
 def gpt_authorized(authorization: str | None = Header(default=None)) -> None:
     if not settings.gpt_action_token:
@@ -126,16 +124,3 @@ async def costs_import(request: Request):
 
 
 
-
-@app.get("/api/admin/buyout-check-once", include_in_schema=False)
-async def buyout_check_once(x_buyout_check_token: str | None = Header(default=None)):
-    supplied_hash = hashlib.sha256((x_buyout_check_token or "").encode()).hexdigest()
-    if not secrets.compare_digest(supplied_hash, BUYOUT_CHECK_TOKEN_HASH):
-        raise HTTPException(404, "Not found")
-    data = get_dashboard(days=30)
-    wanted = {"ordered_units", "sales_units", "return_units", "buyout_rate", "cogs", "net_profit"}
-    return {
-        "kpis": {item["key"]: item for item in data["kpis"] if item["key"] in wanted},
-        "data_quality": data["data_quality"],
-        "categories": data["categories"],
-    }
