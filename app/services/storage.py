@@ -108,6 +108,30 @@ def initialise() -> None:
             cur.execute(f"ALTER TABLE analytics_sku_daily ADD COLUMN IF NOT EXISTS {column} INTEGER NOT NULL DEFAULT 0")
         cur.execute("ALTER TABLE analytics_sku_daily ADD COLUMN IF NOT EXISTS conv_tocart_pdp NUMERIC(8, 3)")
         cur.execute("""
+            CREATE TABLE IF NOT EXISTS analytics_sku_snapshots (
+                date_from DATE NOT NULL,
+                date_to DATE NOT NULL,
+                ozon_sku TEXT NOT NULL,
+                product_name TEXT NOT NULL DEFAULT '',
+                ordered_amount NUMERIC(14, 2) NOT NULL DEFAULT 0,
+                ordered_units INTEGER NOT NULL DEFAULT 0,
+                delivered_units INTEGER NOT NULL DEFAULT 0,
+                returned_units INTEGER NOT NULL DEFAULT 0,
+                canceled_units INTEGER NOT NULL DEFAULT 0,
+                hits_view_search INTEGER NOT NULL DEFAULT 0,
+                hits_view_pdp INTEGER NOT NULL DEFAULT 0,
+                hits_view INTEGER NOT NULL DEFAULT 0,
+                hits_tocart_search INTEGER NOT NULL DEFAULT 0,
+                hits_tocart_pdp INTEGER NOT NULL DEFAULT 0,
+                hits_tocart INTEGER NOT NULL DEFAULT 0,
+                session_view_search INTEGER NOT NULL DEFAULT 0,
+                session_view_pdp INTEGER NOT NULL DEFAULT 0,
+                conv_tocart_pdp NUMERIC(8, 3),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY (date_from, date_to, ozon_sku)
+            )
+        """)
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS sku_costs (
                 ozon_sku TEXT NOT NULL,
                 valid_from DATE NOT NULL,
@@ -264,6 +288,36 @@ def replace_analytics_sku_period(date_from: date, date_to: date, rows: Iterable[
                 row.get("hits_tocart_pdp", 0), row.get("hits_tocart", 0),
                 row.get("session_view_search", 0), row.get("session_view_pdp", 0),
                 row.get("conv_tocart_pdp"),
+            ) for row in prepared])
+        conn.commit()
+
+
+def replace_analytics_sku_snapshot(date_from: date, date_to: date, rows: Iterable[dict]) -> None:
+    """Replace an exact-period Premium Plus snapshot used by the photo dashboard."""
+    prepared = list(rows)
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM analytics_sku_snapshots WHERE date_from = %s AND date_to = %s",
+            (date_from, date_to),
+        )
+        if prepared:
+            cur.executemany("""
+                INSERT INTO analytics_sku_snapshots (
+                    date_from, date_to, ozon_sku, product_name, ordered_amount,
+                    ordered_units, delivered_units, returned_units, canceled_units,
+                    hits_view_search, hits_view_pdp, hits_view,
+                    hits_tocart_search, hits_tocart_pdp, hits_tocart,
+                    session_view_search, session_view_pdp, conv_tocart_pdp, updated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+            """, [(
+                date_from, date_to, row["ozon_sku"], row.get("product_name", ""),
+                row.get("ordered_amount", 0), row.get("ordered_units", 0),
+                row.get("delivered_units", 0), row.get("returned_units", 0),
+                row.get("canceled_units", 0), row.get("hits_view_search", 0),
+                row.get("hits_view_pdp", 0), row.get("hits_view", 0),
+                row.get("hits_tocart_search", 0), row.get("hits_tocart_pdp", 0),
+                row.get("hits_tocart", 0), row.get("session_view_search", 0),
+                row.get("session_view_pdp", 0), row.get("conv_tocart_pdp"),
             ) for row in prepared])
         conn.commit()
 
@@ -670,7 +724,7 @@ def _category_breakdown(cur, date_from: date, date_to: date) -> tuple[list[dict]
             "net_sales_amount": round(net_sales, 2),
             "net_sales_units": net_units,
             "sales_share_percent": round(max(net_sales, 0) / total_net_sales * 100, 1) if total_net_sales else 0.0,
-            "buyout_rate": round(buyout_percent(group["sales_units"], group["return_units"]), 1) if group["sales_units"] else None,
+            "buyout_rate": round(buyout_percent(group["sales_units"], group["ordered_units"]), 1) if group["ordered_units"] else None,
             "ozon_fees": round(group["ozon_fees"], 2),
             "ozon_fees_share_percent": round(group["ozon_fees"] / net_sales * 100, 1) if net_sales > 0 else None,
             "cogs": round(group["cogs_gross"], 2) if costs_ready else None,
@@ -763,8 +817,28 @@ def photo_analytics(
                        SUM(hits_tocart)::int AS hits_tocart,
                        SUM(session_view_search)::int AS session_view_search,
                        SUM(session_view_pdp)::int AS session_view_pdp
+                FROM analytics_sku_snapshots
+                WHERE date_from = %s AND date_to = %s
+                GROUP BY ozon_sku
+                UNION ALL
+                SELECT ozon_sku, MAX(product_name) AS product_name,
+                       SUM(ordered_units)::int AS ordered_units,
+                       SUM(delivered_units)::int AS delivered_units,
+                       SUM(returned_units)::int AS returned_units,
+                       SUM(hits_view_search)::int AS hits_view_search,
+                       SUM(hits_view_pdp)::int AS hits_view_pdp,
+                       SUM(hits_view)::int AS hits_view,
+                       SUM(hits_tocart_search)::int AS hits_tocart_search,
+                       SUM(hits_tocart_pdp)::int AS hits_tocart_pdp,
+                       SUM(hits_tocart)::int AS hits_tocart,
+                       SUM(session_view_search)::int AS session_view_search,
+                       SUM(session_view_pdp)::int AS session_view_pdp
                 FROM analytics_sku_daily
                 WHERE day BETWEEN %s AND %s
+                  AND NOT EXISTS (
+                      SELECT 1 FROM analytics_sku_snapshots
+                      WHERE date_from = %s AND date_to = %s
+                  )
                 GROUP BY ozon_sku
             ), stock_meta AS (
                 SELECT ozon_sku, MAX(offer_id) AS offer_id,
@@ -799,7 +873,7 @@ def photo_analytics(
                                          s.offer_id, p.product_name, m.product_name) ILIKE %s
             ORDER BY m.hits_view_pdp DESC, m.hits_view_search DESC, offer_id
             LIMIT 1000
-        """, (start, end, start, end, needle, needle))
+        """, (start, end, start, end, start, end, start, end, needle, needle))
         source = cur.fetchall()
         cur.execute("""
             SELECT source, state, detail, last_attempt_at, last_success_at
@@ -813,12 +887,7 @@ def photo_analytics(
     )
     rows = []
     for row in source:
-        finance_units_available = row["finance_sold_units"] > 0 or row["finance_returned_units"] > 0
-        retained_units = (
-            max(0, row["finance_sold_units"] - row["finance_returned_units"])
-            if finance_units_available
-            else max(0, row["delivered_units"] - row["returned_units"])
-        )
+        sold_units = row["delivered_units"] if row["delivered_units"] > 0 else row["finance_sold_units"]
         search_to_card = _conversion(row["hits_view_pdp"], row["hits_view_search"])
         rows.append({
             "ozon_sku": row["ozon_sku"],
@@ -835,11 +904,12 @@ def photo_analytics(
             "card_to_favorite": None,
             "card_to_cart": _conversion(row["hits_tocart_pdp"], row["hits_view_pdp"]) if traffic_available else None,
             "cart_to_order": _conversion(row["ordered_units"], row["hits_tocart"]) if traffic_available else None,
-            "order_to_buyout": _conversion(retained_units, row["ordered_units"]),
+            "order_to_buyout": _conversion(sold_units, row["ordered_units"]),
             "cart_additions": row["hits_tocart"] if traffic_available else None,
             "card_cart_additions": row["hits_tocart_pdp"] if traffic_available else None,
             "ordered_units": row["ordered_units"],
-            "retained_units": retained_units,
+            "sold_units": sold_units,
+            "retained_units": sold_units,
         })
 
     totals = {
@@ -848,13 +918,14 @@ def photo_analytics(
         "cart_additions": sum(row["cart_additions"] or 0 for row in rows) if traffic_available else None,
         "card_cart_additions": sum(row["card_cart_additions"] or 0 for row in rows) if traffic_available else None,
         "ordered_units": sum(row["ordered_units"] for row in rows),
-        "retained_units": sum(row["retained_units"] for row in rows),
+        "sold_units": sum(row["sold_units"] for row in rows),
+        "retained_units": sum(row["sold_units"] for row in rows),
     }
     totals.update({
         "ctr": _conversion(totals["views"], totals["search_catalog_impressions"]) if traffic_available else None,
         "card_to_cart": _conversion(totals["card_cart_additions"], totals["views"]) if traffic_available else None,
         "cart_to_order": _conversion(totals["ordered_units"], totals["cart_additions"]) if traffic_available else None,
-        "order_to_buyout": _conversion(totals["retained_units"], totals["ordered_units"]),
+        "order_to_buyout": _conversion(totals["sold_units"], totals["ordered_units"]),
     })
     return {
         "period": {
@@ -866,7 +937,7 @@ def photo_analytics(
         "totals": totals,
         "favorites_available": False,
         "data_available": traffic_available,
-        "buyout_available": totals["retained_units"] > 0,
+        "buyout_available": totals["sold_units"] > 0,
         "source_status": {
             "state": sync_row["state"] if sync_row else "waiting",
             "detail": sync_row["detail"] if sync_row else "Ожидаем первую синхронизацию Ozon Analytics.",
@@ -961,8 +1032,7 @@ def dashboard(days: int = 30, date_from: date | None = None, date_to: date | Non
     returned_units = current["analytics_returned_units"] if analytics_units_ready else current["return_units"]
     previous_gross_sold_units = previous["delivered_units"] if previous["delivered_units"] > 0 else previous["sales_units"]
     previous_returned_units = previous["analytics_returned_units"] if previous["delivered_units"] > 0 else previous["return_units"]
-    net_sold_units = max(0, gross_sold_units - returned_units)
-    buyout_rate = buyout_percent(gross_sold_units, returned_units)
+    buyout_rate = buyout_percent(gross_sold_units, current["ordered_units"])
     return_rate = returned_units / gross_sold_units * 100 if gross_sold_units else 0.0
     cogs_share = current["cogs_gross"] / net_sales_gross * 100 if net_sales_gross > 0 and costs_ready else None
     return_amount_share = current["return_amount"] / current["sales_amount"] * 100 if current["sales_amount"] else 0.0
@@ -991,7 +1061,7 @@ def dashboard(days: int = 30, date_from: date | None = None, date_to: date | Non
         _card("ozon_fees", "Расходы Ozon", current["ozon_fees"] if finance_ready else None, "₽", "neutral" if not finance_ready else traffic_light(ozon_fees_share, good=25, warning=40, inverse=True), "Комиссии, логистика и услуги", "Комиссии, логистика, эквайринг и услуги Ozon. Займы и факторинг сюда не входят.", percent=ozon_fees_share, percent_label="от продаж после возвратов"),
         _card("cogs", "Себестоимость продаж", current["cogs_gross"] if costs_ready else None, "₽", (traffic_light(cogs_share, good=50, warning=70, inverse=True) if costs_complete else "yellow") if costs_ready else "neutral", costs_note, "Закупочная стоимость с НДС плюс дополнительные затраты без НДС, с учётом возвратов.", percent=cogs_share, percent_label="от продаж после возвратов"),
         _card("net_profit", "Чистая прибыль", net_profit, "₽", (traffic_light(net_margin, good=15, warning=5) if costs_complete else "yellow") if net_profit is not None else "neutral", profit_note, "Расчётная прибыль после расходов Ozon, НДС и налога на прибыль. При неполной себестоимости помечается как предварительная.", percent=net_margin, percent_label="чистая рентабельность"),
-        _card("buyout_rate", "Процент выкупа", buyout_rate, "%", traffic_light(buyout_rate, good=80, warning=60), f"Осталось у покупателей: {net_sold_units} из {gross_sold_units} доставленных", "Доставленные товары за вычетом возвратов относительно всех доставленных единиц."),
+        _card("buyout_rate", "Процент выкупа", buyout_rate, "%", traffic_light(buyout_rate, good=70, warning=50), f"Продано: {gross_sold_units} из {current['ordered_units']} заказанных", "Количество проданных товаров, делённое на количество заказанных товаров."),
         _card("markup_before_tax", "Наценка до налогов", markup_before_tax, "%", (traffic_light(markup_before_tax, good=30, warning=10) if costs_complete else "yellow") if markup_before_tax is not None else "neutral", "После себестоимости и всех расходов Ozon", "Продажи после возвратов минус себестоимость с НДС и все расходы Ozon, делённые на себестоимость с НДС."),
         _card("markup_after_tax", "Наценка после налогов", markup_after_tax, "%", (traffic_light(markup_after_tax, good=20, warning=5) if costs_complete else "yellow") if markup_after_tax is not None else "neutral", f"НДС ≈ {blended_vat_rate:.1f}%, налог на прибыль {settings.income_tax_rate:g}%", "Чистая прибыль после расчётных НДС и налога на прибыль, делённая на себестоимость с НДС."),
     ]
