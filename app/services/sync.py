@@ -20,6 +20,7 @@ from app.services.storage import (
 )
 
 logger = logging.getLogger(__name__)
+_sync_lock = asyncio.Lock()
 
 
 def metric_number(value: object) -> float:
@@ -86,16 +87,20 @@ async def sync_operational_data() -> None:
     if not settings.sync_enabled or not settings.ozon_api_key or not settings.ozon_client_id:
         logger.info("Ozon sync skipped: configure new credentials and set SYNC_ENABLED=true")
         return
-    today = date.today()
-    results = await asyncio.gather(
-        sync_analytics_source(OzonSellerClient(), today),
-        sync_finance_source(OzonSellerClient(), today),
-        sync_inventory_source(OzonSellerClient()),
-        return_exceptions=True,
-    )
-    for result in results:
-        if isinstance(result, Exception):
-            logger.error("Ozon background sync failed outside a data source handler: %s", type(result).__name__)
+    if _sync_lock.locked():
+        logger.info("Ozon sync skipped: the previous refresh is still running")
+        return
+    async with _sync_lock:
+        today = date.today()
+        results = await asyncio.gather(
+            sync_analytics_source(OzonSellerClient(), today),
+            sync_finance_source(OzonSellerClient(), today),
+            sync_inventory_source(OzonSellerClient()),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, Exception):
+                logger.error("Ozon background sync failed outside a data source handler: %s", type(result).__name__)
 
 
 def sync_error_detail(error: Exception) -> str:
@@ -110,6 +115,17 @@ def sync_error_detail(error: Exception) -> str:
     if isinstance(error, (httpx.TimeoutException, httpx.NetworkError)):
         return "Ozon API временно недоступен. Повторим синхронизацию автоматически."
     return "Синхронизация временно не завершилась. Повторим автоматически."
+
+
+def analytics_chunks(date_from: date, date_to: date, days: int = 7) -> list[tuple[date, date]]:
+    """Return newest-first windows so recent dashboard data becomes visible first."""
+    chunks: list[tuple[date, date]] = []
+    end = date_to
+    while end >= date_from:
+        start = max(date_from, end - timedelta(days=days - 1))
+        chunks.append((start, end))
+        end = start - timedelta(days=1)
+    return chunks
 
 
 async def sync_analytics_source(client: OzonSellerClient, today: date) -> None:
@@ -150,6 +166,7 @@ async def sync_analytics_source(client: OzonSellerClient, today: date) -> None:
         await asyncio.sleep(61)
         sku_imported = await sync_sku_analytics(client, today - timedelta(days=90), today - timedelta(days=1))
     except Exception as error:
+        set_sync_state("photo_analytics", "error", sync_error_detail(error))
         logger.warning("Ozon SKU analytics sync deferred: %s", type(error).__name__)
     set_sync_state("analytics", "ready", f"Заказы: {imported} дней, детализация: {sku_imported} строк", success=True)
     if skipped:
@@ -158,48 +175,75 @@ async def sync_analytics_source(client: OzonSellerClient, today: date) -> None:
 
 
 async def sync_sku_analytics(client: OzonSellerClient, date_from: date, date_to: date) -> int:
-    offset = 0
-    rows: list[dict] = []
-    while True:
-        payload = await client.sku_analytics(date_from, date_to, offset=offset)
-        data = payload.get("result", {}).get("data", [])
-        for item in data:
-            dimensions = item.get("dimensions") or []
-            metrics = item.get("metrics") or []
-            if len(dimensions) < 2:
-                continue
-            try:
-                day = report_day(dimensions[0])
-                sku, name = dimension_value(dimensions[1])
-                if not sku:
+    imported = 0
+    request_made = False
+    recent_traffic = 0
+    recent_orders = 0
+    set_sync_state("photo_analytics", "syncing", "Сначала загружаем свежие 7 дней")
+    for chunk_index, (chunk_from, chunk_to) in enumerate(analytics_chunks(date_from, date_to)):
+        offset = 0
+        rows: list[dict] = []
+        while True:
+            if request_made:
+                # The endpoint allows one request per minute, including pagination.
+                await asyncio.sleep(61)
+            payload = await client.sku_analytics(chunk_from, chunk_to, offset=offset)
+            request_made = True
+            data = payload.get("result", {}).get("data", [])
+            for item in data:
+                dimensions = item.get("dimensions") or []
+                metrics = item.get("metrics") or []
+                if len(dimensions) < 2:
                     continue
-                rows.append({
-                    "day": day,
-                    "ozon_sku": sku,
-                    "product_name": name,
-                    "ordered_amount": metric_number(metrics[0]) if len(metrics) > 0 else 0,
-                    "ordered_units": int(metric_number(metrics[1])) if len(metrics) > 1 else 0,
-                    "delivered_units": int(metric_number(metrics[2])) if len(metrics) > 2 else 0,
-                    "returned_units": int(metric_number(metrics[3])) if len(metrics) > 3 else 0,
-                    "canceled_units": int(metric_number(metrics[4])) if len(metrics) > 4 else 0,
-                    "hits_view_search": int(metric_number(metrics[5])) if len(metrics) > 5 else 0,
-                    "hits_view_pdp": int(metric_number(metrics[6])) if len(metrics) > 6 else 0,
-                    "hits_view": int(metric_number(metrics[7])) if len(metrics) > 7 else 0,
-                    "hits_tocart_search": int(metric_number(metrics[8])) if len(metrics) > 8 else 0,
-                    "hits_tocart_pdp": int(metric_number(metrics[9])) if len(metrics) > 9 else 0,
-                    "hits_tocart": int(metric_number(metrics[10])) if len(metrics) > 10 else 0,
-                    "session_view_search": int(metric_number(metrics[11])) if len(metrics) > 11 else 0,
-                    "session_view_pdp": int(metric_number(metrics[12])) if len(metrics) > 12 else 0,
-                    "conv_tocart_pdp": metric_number(metrics[13]) if len(metrics) > 13 else None,
-                })
-            except (TypeError, ValueError, IndexError):
-                continue
-        if len(data) < 1000:
-            break
-        offset += 1000
-        await asyncio.sleep(61)
-    replace_analytics_sku_period(date_from, date_to, rows)
-    return len(rows)
+                try:
+                    day = report_day(dimensions[0])
+                    sku, name = dimension_value(dimensions[1])
+                    if not sku:
+                        continue
+                    rows.append({
+                        "day": day,
+                        "ozon_sku": sku,
+                        "product_name": name,
+                        "ordered_amount": metric_number(metrics[0]) if len(metrics) > 0 else 0,
+                        "ordered_units": int(metric_number(metrics[1])) if len(metrics) > 1 else 0,
+                        "delivered_units": int(metric_number(metrics[2])) if len(metrics) > 2 else 0,
+                        "returned_units": int(metric_number(metrics[3])) if len(metrics) > 3 else 0,
+                        "canceled_units": int(metric_number(metrics[4])) if len(metrics) > 4 else 0,
+                        "hits_view_search": int(metric_number(metrics[5])) if len(metrics) > 5 else 0,
+                        "hits_view_pdp": int(metric_number(metrics[6])) if len(metrics) > 6 else 0,
+                        "hits_view": int(metric_number(metrics[7])) if len(metrics) > 7 else 0,
+                        "hits_tocart_search": int(metric_number(metrics[8])) if len(metrics) > 8 else 0,
+                        "hits_tocart_pdp": int(metric_number(metrics[9])) if len(metrics) > 9 else 0,
+                        "hits_tocart": int(metric_number(metrics[10])) if len(metrics) > 10 else 0,
+                        "session_view_search": int(metric_number(metrics[11])) if len(metrics) > 11 else 0,
+                        "session_view_pdp": int(metric_number(metrics[12])) if len(metrics) > 12 else 0,
+                        "conv_tocart_pdp": metric_number(metrics[13]) if len(metrics) > 13 else None,
+                    })
+                except (TypeError, ValueError, IndexError):
+                    continue
+            if len(data) < 1000:
+                break
+            offset += 1000
+        replace_analytics_sku_period(chunk_from, chunk_to, rows)
+        imported += len(rows)
+        if chunk_index == 0:
+            recent_orders = sum(row["ordered_units"] for row in rows)
+            recent_traffic = sum(row["hits_view_search"] + row["hits_view_pdp"] for row in rows)
+            if recent_orders > 0 and recent_traffic == 0:
+                set_sync_state(
+                    "photo_analytics", "limited",
+                    "Заказы обновлены. Просмотры и конверсии Ozon передаёт через Seller API только с Premium Plus или Premium Pro.",
+                    success=True,
+                )
+            else:
+                set_sync_state(
+                    "photo_analytics", "ready",
+                    f"Свежие 7 дней обновлены: {len(rows)} строк",
+                    success=True,
+                )
+    if recent_orders == 0 or recent_traffic > 0:
+        set_sync_state("photo_analytics", "ready", f"Воронка обновлена: {imported} строк", success=True)
+    return imported
 
 
 def current_price(item: dict) -> float:
