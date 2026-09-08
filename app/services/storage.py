@@ -9,7 +9,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from app.config import settings
-from app.services.finance import percent_change, product_group, traffic_light, trend_status, vat_part
+from app.services.finance import EXPENSE_KEYS, buyout_percent, percent_change, product_group, traffic_light, trend_status, vat_part
 
 
 @contextmanager
@@ -41,9 +41,17 @@ def initialise() -> None:
                 net_payout NUMERIC(14, 2) NOT NULL DEFAULT 0,
                 sales_units INTEGER NOT NULL DEFAULT 0,
                 return_units INTEGER NOT NULL DEFAULT 0,
+                reward NUMERIC(14, 2) NOT NULL DEFAULT 0,
+                delivery NUMERIC(14, 2) NOT NULL DEFAULT 0,
+                partner NUMERIC(14, 2) NOT NULL DEFAULT 0,
+                fbo NUMERIC(14, 2) NOT NULL DEFAULT 0,
+                promotion NUMERIC(14, 2) NOT NULL DEFAULT 0,
+                other NUMERIC(14, 2) NOT NULL DEFAULT 0,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
             )
         """)
+        for column in EXPENSE_KEYS:
+            cur.execute(f"ALTER TABLE daily_finance ADD COLUMN IF NOT EXISTS {column} NUMERIC(14, 2) NOT NULL DEFAULT 0")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS finance_sku_daily (
                 day DATE NOT NULL,
@@ -153,13 +161,17 @@ def replace_finance_period(
             cur.execute("""
                 INSERT INTO daily_finance (
                     day, sales_amount, return_amount, ozon_fees, net_payout,
-                    sales_units, return_units, updated_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, now())
+                    sales_units, return_units, reward, delivery, partner, fbo,
+                    promotion, other, updated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
             """, (
                 current,
                 row.get("sales_amount", 0), row.get("return_amount", 0),
                 row.get("ozon_fees", 0), row.get("net_payout", 0),
                 row.get("sales_units", 0), row.get("return_units", 0),
+                row.get("reward", 0), row.get("delivery", 0),
+                row.get("partner", 0), row.get("fbo", 0),
+                row.get("promotion", 0), row.get("other", 0),
             ))
             current += timedelta(days=1)
         if sku_daily:
@@ -237,14 +249,19 @@ def finance_earliest_day() -> date | None:
 
 
 def finance_needs_sku_backfill() -> bool:
-    """Detect rows created before per-SKU amounts were introduced."""
+    """Detect rows created before SKU amounts or fee categories existed."""
     with connection() as conn, conn.cursor() as cur:
         cur.execute("""
             SELECT EXISTS (SELECT 1 FROM daily_finance WHERE sales_amount > 0) AS has_finance,
-                   EXISTS (SELECT 1 FROM finance_sku_daily WHERE sales_amount > 0) AS has_sku_amounts
+                   EXISTS (SELECT 1 FROM finance_sku_daily WHERE sales_amount > 0) AS has_sku_amounts,
+                   EXISTS (
+                       SELECT 1 FROM daily_finance
+                       WHERE ozon_fees > 0
+                         AND reward + delivery + partner + fbo + promotion + other = 0
+                   ) AS missing_fee_breakdown
         """)
         row = cur.fetchone()
-        return bool(row["has_finance"] and not row["has_sku_amounts"])
+        return bool(row["has_finance"] and (not row["has_sku_amounts"] or row["missing_fee_breakdown"]))
 
 
 def set_sync_state(source: str, state: str, detail: str = "", *, success: bool = False) -> None:
@@ -335,6 +352,12 @@ def _period_rows(cur, date_from: date, date_to: date) -> list[dict]:
             COALESCE(f.net_payout, 0)::float AS net_payout,
             COALESCE(f.sales_units, 0) AS sales_units,
             COALESCE(f.return_units, 0) AS return_units,
+            COALESCE(f.reward, 0)::float AS reward,
+            COALESCE(f.delivery, 0)::float AS delivery,
+            COALESCE(f.partner, 0)::float AS partner,
+            COALESCE(f.fbo, 0)::float AS fbo,
+            COALESCE(f.promotion, 0)::float AS promotion,
+            COALESCE(f.other, 0)::float AS other,
             (f.day IS NOT NULL) AS finance_present
         FROM daily_metrics m
         FULL OUTER JOIN daily_finance f ON f.day = m.day
@@ -360,8 +383,12 @@ def _costs(cur, date_from: date, date_to: date) -> dict:
             FROM movements m
             LEFT JOIN LATERAL (
                 SELECT * FROM sku_costs c
-                WHERE c.ozon_sku = m.ozon_sku AND c.valid_from <= m.day
-                ORDER BY c.valid_from DESC LIMIT 1
+                WHERE c.ozon_sku = m.ozon_sku
+                ORDER BY
+                    CASE WHEN c.valid_from <= m.day THEN 0 ELSE 1 END,
+                    CASE WHEN c.valid_from <= m.day THEN c.valid_from END DESC,
+                    CASE WHEN c.valid_from > m.day THEN c.valid_from END ASC
+                LIMIT 1
             ) c ON TRUE
         )
         SELECT
@@ -395,6 +422,7 @@ def _snapshot(cur, date_from: date, date_to: date) -> dict:
         "return_units": sum(row["return_units"] for row in rows),
         "ozon_fees": sum(row["ozon_fees"] for row in rows),
         "net_payout": sum(row["net_payout"] for row in rows),
+        **{key: sum(row[key] for row in rows) for key in EXPENSE_KEYS},
     }
     totals.update(costs)
     totals["rows"] = rows
@@ -428,8 +456,12 @@ def _category_breakdown(cur, date_from: date, date_to: date) -> tuple[list[dict]
             FROM finance_sku_daily f
             LEFT JOIN LATERAL (
                 SELECT * FROM sku_costs c
-                WHERE c.ozon_sku = f.ozon_sku AND c.valid_from <= f.day
-                ORDER BY c.valid_from DESC LIMIT 1
+                WHERE c.ozon_sku = f.ozon_sku
+                ORDER BY
+                    CASE WHEN c.valid_from <= f.day THEN 0 ELSE 1 END,
+                    CASE WHEN c.valid_from <= f.day THEN c.valid_from END DESC,
+                    CASE WHEN c.valid_from > f.day THEN c.valid_from END ASC
+                LIMIT 1
             ) c ON TRUE
             WHERE f.day BETWEEN %s AND %s
             GROUP BY f.ozon_sku
@@ -455,10 +487,14 @@ def _category_breakdown(cur, date_from: date, date_to: date) -> tuple[list[dict]
         LEFT JOIN finance f ON f.ozon_sku = k.ozon_sku
         LEFT JOIN LATERAL (
             SELECT product_group, sale_vat_rate FROM sku_costs c
-            WHERE c.ozon_sku = k.ozon_sku AND c.valid_from <= %s
-            ORDER BY c.valid_from DESC LIMIT 1
+            WHERE c.ozon_sku = k.ozon_sku
+            ORDER BY
+                CASE WHEN c.valid_from <= %s THEN 0 ELSE 1 END,
+                CASE WHEN c.valid_from <= %s THEN c.valid_from END DESC,
+                CASE WHEN c.valid_from > %s THEN c.valid_from END ASC
+            LIMIT 1
         ) c ON TRUE
-    """, (date_from, date_to, date_from, date_to, date_to))
+    """, (date_from, date_to, date_from, date_to, date_to, date_to, date_to))
     groups = {
         key: {
             "key": key, "ordered_amount": 0.0, "ordered_units": 0,
@@ -482,22 +518,44 @@ def _category_breakdown(cur, date_from: date, date_to: date) -> tuple[list[dict]
         target["output_vat"] += max(row["sales_amount"] - row["return_amount"], 0) * rate / (100 + rate)
 
     total_net_sales = sum(max(group["sales_amount"] - group["return_amount"], 0) for group in groups.values())
+    # Some Ozon costs (advertising, storage, adjustments) are account-level and
+    # have no SKU in the finance operation. Allocate that remainder by each
+    # category's net-sales share so category profitability reconciles to the
+    # shop total instead of silently omitting overhead.
+    cur.execute("""
+        SELECT COALESCE(SUM(ozon_fees), 0)::float AS total_ozon_fees
+        FROM daily_finance WHERE day BETWEEN %s AND %s
+    """, (date_from, date_to))
+    total_ozon_fees = cur.fetchone()["total_ozon_fees"]
+    attributed_fees = sum(group["ozon_fees"] for group in groups.values())
+    if total_net_sales > 0 and attributed_fees < total_ozon_fees:
+        unallocated = total_ozon_fees - attributed_fees
+        for group in groups.values():
+            group_sales = max(group["sales_amount"] - group["return_amount"], 0)
+            group["ozon_fees"] += unallocated * group_sales / total_net_sales
+    elif attributed_fees > 0 and attributed_fees > total_ozon_fees:
+        scale = max(total_ozon_fees, 0) / attributed_fees
+        for group in groups.values():
+            group["ozon_fees"] *= scale
     labels = {"men": "Мужское", "women": "Женское", "kids": "Детское", "unknown": "Не распределено"}
     result = []
     for key, group in groups.items():
         if key == "unknown" and not (group["ordered_units"] or group["sales_units"]):
             continue
         net_sales = group["sales_amount"] - group["return_amount"]
-        net_units = group["sales_units"] - group["return_units"]
+        net_units = max(0, group["sales_units"] - group["return_units"])
         coverage = group["priced_units"] / group["movement_units"] * 100 if group["movement_units"] else 0.0
         costs_ready = group["movement_units"] > 0 and coverage >= 99.9
         fees_net = group["ozon_fees"] - vat_part(group["ozon_fees"], settings.ozon_service_vat_rate)
-        profit_before_tax = net_profit = markup = None
+        contribution_before_taxes = profit_before_tax = net_profit = None
+        markup_before_tax = markup_after_tax = None
         if costs_ready:
+            contribution_before_taxes = net_sales - group["cogs_gross"] - group["ozon_fees"]
             profit_before_tax = net_sales - group["output_vat"] - group["cogs_net"] - fees_net
             net_profit = profit_before_tax - max(profit_before_tax, 0) * settings.income_tax_rate / 100
-            if group["cogs_net"]:
-                markup = net_profit / group["cogs_net"] * 100
+            if group["cogs_gross"]:
+                markup_before_tax = contribution_before_taxes / group["cogs_gross"] * 100
+                markup_after_tax = net_profit / group["cogs_gross"] * 100
         result.append({
             "key": key, "name": labels[key],
             "ordered_amount": round(group["ordered_amount"], 2),
@@ -505,12 +563,15 @@ def _category_breakdown(cur, date_from: date, date_to: date) -> tuple[list[dict]
             "net_sales_amount": round(net_sales, 2),
             "net_sales_units": net_units,
             "sales_share_percent": round(max(net_sales, 0) / total_net_sales * 100, 1) if total_net_sales else 0.0,
-            "buyout_rate": round(max(0, min(100, net_units / group["ordered_units"] * 100)), 1) if group["ordered_units"] else 0.0,
+            "buyout_rate": round(buyout_percent(group["ordered_units"], group["sales_units"], group["return_units"]), 1) if group["ordered_units"] else None,
+            "ozon_fees": round(group["ozon_fees"], 2),
+            "ozon_fees_share_percent": round(group["ozon_fees"] / net_sales * 100, 1) if net_sales > 0 else None,
             "cogs": round(group["cogs_gross"], 2) if costs_ready else None,
             "net_profit": round(net_profit, 2) if net_profit is not None else None,
-            "markup_after_tax": round(markup, 1) if markup is not None else None,
+            "markup_before_tax": round(markup_before_tax, 1) if markup_before_tax is not None else None,
+            "markup_after_tax": round(markup_after_tax, 1) if markup_after_tax is not None else None,
             "cost_coverage_percent": round(coverage, 1),
-            "status": traffic_light(markup, good=20, warning=5) if costs_ready else "neutral",
+            "status": traffic_light(markup_after_tax, good=20, warning=5) if costs_ready else "neutral",
         })
     unknown_units = groups["unknown"]["ordered_units"] + groups["unknown"]["sales_units"]
     return result, unknown_units, sum(group["output_vat"] for group in groups.values())
@@ -537,18 +598,24 @@ def _warehouse_breakdown(cur) -> tuple[list[dict], str | None]:
         ORDER BY retail_value DESC, units DESC
     """)
     rows = cur.fetchall()
-    total_value = sum(row["retail_value"] for row in rows)
+    total_value = sum(row["retail_value"] or 0 for row in rows)
     result = []
     latest = None
     for row in rows:
-        cost_ready = row["units"] > 0 and row["priced_units"] >= row["units"]
-        retail_ready = row["units"] > 0 and row["retail_priced_units"] >= row["units"]
+        units = max(int(row["units"] or 0), 0)
+        priced_units = max(int(row["priced_units"] or 0), 0)
+        retail_priced_units = max(int(row["retail_priced_units"] or 0), 0)
+        cost_coverage = priced_units / units * 100 if units else 0.0
+        retail_coverage = retail_priced_units / units * 100 if units else 0.0
         result.append({
-            "warehouse_name": row["warehouse_name"], "units": row["units"],
+            "warehouse_name": row["warehouse_name"], "units": units,
             "reserved_units": row["reserved_units"], "promised_units": row["promised_units"],
-            "retail_value": round(row["retail_value"], 2) if retail_ready else None,
-            "cost_value": round(row["cost_value"], 2) if cost_ready else None,
-            "share_percent": round(row["retail_value"] / total_value * 100, 1) if total_value and retail_ready else None,
+            "retail_value": round(row["retail_value"], 2) if retail_priced_units else None,
+            "cost_value": round(row["cost_value"], 2) if priced_units else None,
+            "share_percent": round((row["retail_value"] or 0) / total_value * 100, 1) if total_value else None,
+            "cost_coverage_percent": round(cost_coverage, 1),
+            "retail_coverage_percent": round(retail_coverage, 1),
+            "missing_cost_units": max(units - priced_units, 0),
         })
         if row["updated_at"] and (latest is None or row["updated_at"] > latest):
             latest = row["updated_at"]
@@ -620,28 +687,33 @@ def dashboard(days: int = 30, date_from: date | None = None, date_to: date | Non
     ozon_input_vat = vat_part(current["ozon_fees"], settings.ozon_service_vat_rate)
     ozon_fees_net = current["ozon_fees"] - ozon_input_vat
     vat_payable = max(output_vat - current["input_vat"] - ozon_input_vat, 0)
-    profit_before_tax = income_tax = net_profit = None
+    contribution_before_taxes = profit_before_tax = income_tax = net_profit = None
     markup_before_tax = markup_after_tax = net_margin = None
     if costs_ready and finance_ready:
+        contribution_before_taxes = net_sales_gross - current["cogs_gross"] - current["ozon_fees"]
         profit_before_tax = net_sales_gross - output_vat - current["cogs_net"] - ozon_fees_net
         income_tax = max(profit_before_tax, 0) * settings.income_tax_rate / 100
         net_profit = profit_before_tax - income_tax
-        if current["cogs_net"]:
-            markup_before_tax = profit_before_tax / current["cogs_net"] * 100
-            markup_after_tax = net_profit / current["cogs_net"] * 100
+        if current["cogs_gross"]:
+            markup_before_tax = contribution_before_taxes / current["cogs_gross"] * 100
+            markup_after_tax = net_profit / current["cogs_gross"] * 100
         sales_net_of_vat = net_sales_gross - output_vat
         if sales_net_of_vat:
             net_margin = net_profit / sales_net_of_vat * 100
 
-    net_sold_units = current["sales_units"] - current["return_units"]
-    buyout_rate = max(0.0, min(100.0, net_sold_units / current["ordered_units"] * 100)) if current["ordered_units"] else 0.0
+    net_sold_units = max(0, current["sales_units"] - current["return_units"])
+    buyout_rate = buyout_percent(current["ordered_units"], current["sales_units"], current["return_units"])
     return_rate = current["return_units"] / current["sales_units"] * 100 if current["sales_units"] else 0.0
     cogs_share = current["cogs_gross"] / net_sales_gross * 100 if net_sales_gross > 0 and costs_ready else None
     return_amount_share = current["return_amount"] / current["sales_amount"] * 100 if current["sales_amount"] else 0.0
     ozon_fees_share = current["ozon_fees"] / net_sales_gross * 100 if net_sales_gross > 0 and finance_ready else None
 
     period_note = f"{start.strftime('%d.%m.%Y')}–{end.strftime('%d.%m.%Y')}"
-    costs_note = f"Себестоимость покрывает {coverage:g}% движений" if movement_units else "Загрузите себестоимость по SKU"
+    missing_cost_units = max(movement_units - current["priced_units"], 0)
+    costs_note = (
+        f"Покрытие {coverage:g}% · без цены {missing_cost_units} движений"
+        if movement_units else "Загрузите себестоимость по SKU"
+    )
     profit_note = f"Рентабельность {net_margin:.1f}%" if net_margin is not None else costs_note
 
     return_amount_status = "red" if previous["return_amount"] == 0 and current["return_amount"] > 0 else trend_status(current["return_amount"], previous["return_amount"], inverse=True)
@@ -656,9 +728,9 @@ def dashboard(days: int = 30, date_from: date | None = None, date_to: date | Non
         _card("ozon_fees", "Расходы Ozon", current["ozon_fees"] if finance_ready else None, "₽", "neutral" if not finance_ready else traffic_light(ozon_fees_share, good=25, warning=40, inverse=True), "Комиссии, логистика и услуги", "Все комиссии, логистика, эквайринг и другие удержания Ozon за период.", percent=ozon_fees_share, percent_label="от продаж после возвратов"),
         _card("cogs", "Себестоимость продаж", current["cogs_gross"] if costs_ready else None, "₽", traffic_light(cogs_share, good=50, warning=70, inverse=True), costs_note, "Закупочная стоимость с НДС плюс дополнительные затраты без НДС, с учётом возвратов.", percent=cogs_share, percent_label="от продаж после возвратов"),
         _card("net_profit", "Чистая прибыль", net_profit, "₽", traffic_light(net_margin, good=15, warning=5), profit_note, "Расчётная прибыль после расходов Ozon, НДС и налога на прибыль. Требует полной себестоимости.", percent=net_margin, percent_label="чистая рентабельность"),
-        _card("buyout_rate", "Процент выкупа", buyout_rate, "%", traffic_light(buyout_rate, good=80, warning=60), f"Продано за вычетом возвратов: {net_sold_units} шт.", "Проданные товары за вычетом возвратов относительно заказанных единиц."),
-        _card("markup_before_tax", "Наценка после расходов Ozon", markup_before_tax, "%", traffic_light(markup_before_tax, good=30, warning=10), "До налога на прибыль", "Расчётная прибыль до налога на прибыль, делённая на себестоимость без возмещаемого НДС."),
-        _card("markup_after_tax", "Наценка после налогов", markup_after_tax, "%", traffic_light(markup_after_tax, good=20, warning=5), f"НДС ≈ {blended_vat_rate:.1f}%, налог на прибыль {settings.income_tax_rate:g}%", "Чистая прибыль после расчётных налогов, делённая на себестоимость без возмещаемого НДС."),
+        _card("buyout_rate", "Процент выкупа", buyout_rate, "%", traffic_light(buyout_rate, good=80, warning=60), f"Выкуплено: {net_sold_units} из {current['ordered_units']} шт.", "Фактически проданные товары за вычетом возвратов относительно заказанных единиц."),
+        _card("markup_before_tax", "Наценка до налогов", markup_before_tax, "%", traffic_light(markup_before_tax, good=30, warning=10), "После себестоимости и всех расходов Ozon", "Продажи после возвратов минус себестоимость с НДС и все расходы Ozon, делённые на себестоимость с НДС."),
+        _card("markup_after_tax", "Наценка после налогов", markup_after_tax, "%", traffic_light(markup_after_tax, good=20, warning=5), f"НДС ≈ {blended_vat_rate:.1f}%, налог на прибыль {settings.income_tax_rate:g}%", "Чистая прибыль после расчётных НДС и налога на прибыль, делённая на себестоимость с НДС."),
     ]
 
     insights = []
@@ -670,7 +742,7 @@ def dashboard(days: int = 30, date_from: date | None = None, date_to: date | Non
         insights.append({"status": "yellow", "title": "Есть товары без категории", "text": f"Не распределено движений: {unclassified_units}. Укажите категорию в CSV себестоимости."})
     if not warehouses:
         insights.append({"status": "yellow", "title": "Остатки FBO ещё не загружены", "text": "Данные по складам появятся после следующей синхронизации Seller API."})
-    if buyout_rate and buyout_rate < 60:
+    if buyout_rate is not None and buyout_rate < 60:
         insights.append({"status": "red", "title": "Низкий процент выкупа", "text": "Проверьте причины отмен и возвратов по товарам и размерам."})
     if net_profit is not None and net_profit < 0:
         insights.append({"status": "red", "title": "Отрицательная прибыль", "text": "Расходы и себестоимость превышают доход без НДС за выбранный период."})
@@ -700,12 +772,29 @@ def dashboard(days: int = 30, date_from: date | None = None, date_to: date | Non
             "income_tax": round(income_tax, 2) if income_tax is not None else None,
             "net_profit": round(net_profit, 2) if net_profit is not None else None,
         },
+        "ozon_expenses": [
+            {
+                "key": key,
+                "name": {
+                    "reward": "Вознаграждение Ozon",
+                    "delivery": "Услуги доставки и логистика",
+                    "partner": "Услуги партнёров и эквайринг",
+                    "fbo": "Услуги FBO и хранение",
+                    "promotion": "Продвижение и реклама",
+                    "other": "Другие услуги и штрафы",
+                }[key],
+                "value": round(current[key], 2),
+                "share_percent": round(current[key] / net_sales_gross * 100, 1) if net_sales_gross > 0 else None,
+            }
+            for key in EXPENSE_KEYS
+        ],
         "tax_policy": {"adult_vat_rate": 22, "kids_vat_rate": 10, "income_tax_rate": settings.income_tax_rate},
         "categories": categories,
         "warehouses": warehouses,
         "data_quality": {
             "finance_ready": finance_ready,
             "cost_coverage_percent": coverage,
+            "missing_cost_units": missing_cost_units,
             "tax_estimate": True,
             "earliest_date": availability["earliest"].isoformat() if availability and availability["earliest"] else None,
             "latest_date": availability["latest"].isoformat() if availability and availability["latest"] else None,
