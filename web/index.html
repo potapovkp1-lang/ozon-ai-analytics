@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>Ozon — аналитика магазина</title>
-  <link rel="stylesheet" href="/assets/styles.css?v=20260904-3">
+  <link rel="stylesheet" href="/assets/styles.css?v=20260908-1">
 </head>
 <body>
   <main class="page">
@@ -91,12 +91,16 @@
         <p>С учётом комиссий, логистики и налогов</p>
       </div>
       <div class="metric-grid economy-grid" id="economyCards"></div>
+      <article class="panel expense-panel">
+        <div class="panel-title"><div><p class="overline">РАСХОДЫ OZON</p><h2>Из чего состоят удержания</h2><p>Сумма и доля от продаж после возвратов</p></div></div>
+        <div class="expense-list" id="expenseList"><div class="loading">Разбираем расходы по видам…</div></div>
+      </article>
     </section>
 
     <section class="dashboard-section">
       <div class="section-heading compact-heading">
         <div><p class="overline">КАТЕГОРИИ</p><h2>Мужское, женское и детское</h2></div>
-        <p>Продажи, доля, выкуп, себестоимость и наценка после налогов</p>
+        <p>Продажи, выкуп, расходы, себестоимость и наценка до и после налогов</p>
       </div>
       <div class="category-grid" id="categoryGrid"><div class="loading">Собираем аналитику по товарам…</div></div>
     </section>
@@ -235,7 +239,9 @@ function categoryCard(item) {
       <div><span>Заказано</span><b>${money(item.ordered_amount)}</b><small>${number(item.ordered_units)} шт.</small></div>
       <div><span>Процент выкупа</span><b>${percent(item.buyout_rate)}</b></div>
       <div><span>Себестоимость</span><b>${money(item.cogs)}</b><small>покрытие ${percent(item.cost_coverage_percent)}</small></div>
-      <div><span>Наценка после налогов</span><b>${percent(item.markup_after_tax)}</b><small>${item.net_profit == null ? 'нужна себестоимость' : `прибыль ${money(item.net_profit)}`}</small></div>
+      <div><span>Расходы Ozon</span><b>${money(item.ozon_fees)}</b><small>${percent(item.ozon_fees_share_percent)} от продаж</small></div>
+      <div><span>Наценка до налогов</span><b>${percent(item.markup_before_tax)}</b><small>после расходов Ozon</small></div>
+      <div><span>Наценка после налогов</span><b>${percent(item.markup_after_tax)}</b><small>${item.net_profit == null ? 'нужна себестоимость' : `чистая прибыль ${money(item.net_profit)}`}</small></div>
     </div>
   </article>`;
 }
@@ -243,14 +249,23 @@ function renderCategories(items=[]) {
   const target=document.getElementById('categoryGrid');
   target.innerHTML=items.length ? items.map(categoryCard).join('') : '<div class="empty-state panel"><b>Категории пока не рассчитаны</b><span>Детализация появится после синхронизации заказов по SKU.</span></div>';
 }
+function renderExpenses(items=[]) {
+  const visible=items.filter(item=>Number(item.value||0)>0);
+  document.getElementById('expenseList').innerHTML=visible.length ? visible.map(item=>{
+    const width=Math.max(0,Math.min(100,Number(item.share_percent||0)));
+    return `<div class="expense-row"><div class="expense-label"><span>${escapeHtml(item.name)}</span><b>${money(item.value)} <em>${percent(item.share_percent)}</em></b></div><div class="expense-track"><i style="width:${width}%"></i></div></div>`;
+  }).join('') : '<div class="empty-state compact-empty"><b>Детализация появится после пересинхронизации</b><span>Общая сумма расходов уже учитывается в прибыли.</span></div>';
+}
 function renderWarehouses(items=[], updatedAt=null) {
   const body=document.getElementById('warehouseRows');
   const totalUnits=items.reduce((sum,row)=>sum+Number(row.units||0),0);
-  const totalRetail=items.every(row=>row.retail_value!=null) ? items.reduce((sum,row)=>sum+Number(row.retail_value||0),0) : null;
-  const totalCost=items.every(row=>row.cost_value!=null) ? items.reduce((sum,row)=>sum+Number(row.cost_value||0),0) : null;
-  document.getElementById('warehouseSummary').innerHTML=`<div><span>Всего на FBO</span><b>${number(totalUnits)} шт.</b></div><div><span>Розничная стоимость</span><b>${money(totalRetail)}</b></div><div><span>Себестоимость остатка</span><b>${money(totalCost)}</b></div>`;
+  const totalRetail=items.some(row=>row.retail_value!=null) ? items.reduce((sum,row)=>sum+Number(row.retail_value||0),0) : null;
+  const totalCost=items.some(row=>row.cost_value!=null) ? items.reduce((sum,row)=>sum+Number(row.cost_value||0),0) : null;
+  const coveredCostUnits=items.reduce((sum,row)=>sum+Math.max(0,Number(row.units||0)-Number(row.missing_cost_units||0)),0);
+  const costCoverage=totalUnits ? coveredCostUnits/totalUnits*100 : 0;
+  document.getElementById('warehouseSummary').innerHTML=`<div><span>Всего на FBO</span><b>${number(totalUnits)} шт.</b></div><div><span>Розничная стоимость</span><b>${money(totalRetail)}</b></div><div><span>Известная себестоимость</span><b>${money(totalCost)}</b></div><div><span>Покрытие себестоимостью</span><b>${percent(costCoverage)}</b></div>`;
   document.getElementById('warehouseUpdated').textContent=updatedAt ? `Остатки обновлены ${new Date(updatedAt).toLocaleString('ru-RU')}` : 'Ожидаем первую синхронизацию остатков';
-  body.innerHTML=items.length ? items.map(row=>`<tr><td><b>${escapeHtml(row.warehouse_name)}</b></td><td>${number(row.units)} шт.</td><td>${number(row.reserved_units)} шт.</td><td>${money(row.retail_value)}</td><td>${money(row.cost_value)}</td><td><span class="share-bar"><i style="width:${Math.max(0,Math.min(100,Number(row.share_percent||0)))}%"></i></span><b>${percent(row.share_percent)}</b></td></tr>`).join('') : '<tr><td colspan="6" class="table-empty">Остатки FBO появятся после синхронизации Seller API.</td></tr>';
+  body.innerHTML=items.length ? items.map(row=>`<tr><td><b>${escapeHtml(row.warehouse_name)}</b></td><td>${number(row.units)} шт.</td><td>${number(row.reserved_units)} шт.</td><td>${money(row.retail_value)}</td><td><b>${money(row.cost_value)}</b><small>${row.missing_cost_units ? `покрытие ${percent(row.cost_coverage_percent)} · без цены ${number(row.missing_cost_units)} шт.` : 'полное покрытие'}</small></td><td><span class="share-bar"><i style="width:${Math.max(0,Math.min(100,Number(row.share_percent||0)))}%"></i></span><b>${percent(row.share_percent)}</b></td></tr>`).join('') : '<tr><td colspan="6" class="table-empty">Остатки FBO появятся после синхронизации Seller API.</td></tr>';
 }
 function qualityItem(title, state, detail) {
   return `<div class="quality-item ${state}"><i></i><div><b>${escapeHtml(title)}</b><span>${escapeHtml(detail)}</span></div></div>`;
@@ -277,6 +292,7 @@ function render(data) {
   document.getElementById('chart').innerHTML = chartSvg(data.series, data.data_quality.finance_ready);
   document.getElementById('chartHint').textContent = data.data_quality.finance_ready ? 'По дням за выбранный период' : 'Продажи появятся после финансовой синхронизации';
   document.getElementById('breakdown').innerHTML = breakdownRows(data.breakdown);
+  renderExpenses(data.ozon_expenses);
   document.getElementById('adultVat').textContent=percent(data.tax_policy?.adult_vat_rate);
   document.getElementById('kidsVat').textContent=percent(data.tax_policy?.kids_vat_rate);
   document.getElementById('incomeTaxRate').textContent=percent(data.tax_policy?.income_tax_rate);
