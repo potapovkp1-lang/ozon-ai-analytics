@@ -57,15 +57,26 @@ def transaction_bucket(operation: dict) -> str | None:
     """Classify only real sale/return movements; ignore service adjustments."""
     transaction_type = str(operation.get("type") or "").strip().lower()
     operation_type = str(operation.get("operation_type") or operation.get("operation_type_name") or "").lower()
-    if transaction_type == "orders":
-        return "sale"
-    if transaction_type == "returns":
-        return "return"
     if any(token in operation_type for token in ("return", "refund", "возврат")):
+        return "return"
+    if transaction_type == "returns":
         return "return"
     if any(token in operation_type for token in ("delivered", "sale", "реализац", "продаж")):
         return "sale"
+    if transaction_type == "orders":
+        return "sale"
     return None
+
+
+def posting_number(operation: dict) -> str:
+    posting = operation.get("posting") or {}
+    return str(
+        posting.get("posting_number")
+        or operation.get("posting_number")
+        or operation.get("operation_id")
+        or operation.get("id")
+        or ""
+    )
 
 
 def expense_category(name: str) -> str:
@@ -149,7 +160,8 @@ def aggregate_finance_operations(operations: Iterable[dict]) -> tuple[dict[date,
         "return_amount": 0.0, "ozon_fees": 0.0,
     })
 
-    for operation in operations:
+    seen_units: set[tuple[str, str, str, int]] = set()
+    for operation_index, operation in enumerate(operations):
         try:
             day = operation_day(operation)
         except (TypeError, ValueError):
@@ -159,6 +171,16 @@ def aggregate_finance_operations(operations: Iterable[dict]) -> tuple[dict[date,
         bucket = transaction_bucket(operation)
         items = operation_items(operation)
         skus = [sku for sku, _ in items]
+        posting = posting_number(operation) or f"row-{operation_index}"
+        occurrences: dict[str, int] = defaultdict(int)
+        movement_items: list[tuple[str, str, bool]] = []
+        for sku, product_name in items:
+            occurrences[sku] += 1
+            unit_key = (bucket or "none", posting, sku, occurrences[sku])
+            is_new_unit = unit_key not in seen_units
+            if bucket in {"sale", "return"} and is_new_unit:
+                seen_units.add(unit_key)
+            movement_items.append((sku, product_name, is_new_unit))
         item_count = len(items)
         amount_per_item = abs(accrual) / item_count if item_count else 0.0
         fee_total = operation_fees(operation)
@@ -166,17 +188,19 @@ def aggregate_finance_operations(operations: Iterable[dict]) -> tuple[dict[date,
 
         if bucket == "sale" and accrual > 0:
             row["sales_amount"] += accrual
-            row["sales_units"] += len(skus)
-            for sku, product_name in items:
-                sku_daily[(day, sku)]["sales_units"] += 1
+            row["sales_units"] += sum(1 for _, _, is_new in movement_items if is_new)
+            for sku, product_name, is_new in movement_items:
+                if is_new:
+                    sku_daily[(day, sku)]["sales_units"] += 1
                 sku_daily[(day, sku)]["sales_amount"] += amount_per_item
                 sku_daily[(day, sku)]["ozon_fees"] += fee_per_item
                 sku_daily[(day, sku)]["product_name"] = product_name
         elif bucket == "return" and skus:
             row["return_amount"] += abs(accrual)
-            row["return_units"] += len(skus)
-            for sku, product_name in items:
-                sku_daily[(day, sku)]["return_units"] += 1
+            row["return_units"] += sum(1 for _, _, is_new in movement_items if is_new)
+            for sku, product_name, is_new in movement_items:
+                if is_new:
+                    sku_daily[(day, sku)]["return_units"] += 1
                 sku_daily[(day, sku)]["return_amount"] += amount_per_item
                 sku_daily[(day, sku)]["ozon_fees"] += fee_per_item
                 sku_daily[(day, sku)]["product_name"] = product_name
