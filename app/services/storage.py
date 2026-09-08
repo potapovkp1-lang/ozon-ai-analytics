@@ -256,7 +256,7 @@ def finance_needs_sku_backfill() -> bool:
                    EXISTS (SELECT 1 FROM finance_sku_daily WHERE sales_amount > 0) AS has_sku_amounts,
                    NOT EXISTS (
                        SELECT 1 FROM sync_state
-                       WHERE source = 'finance_units_v2' AND state = 'ready'
+                       WHERE source = 'finance_units_v3' AND state = 'ready'
                    ) AS missing_unit_deduplication,
                    EXISTS (
                        SELECT 1 FROM daily_finance
