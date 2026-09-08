@@ -13,6 +13,13 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+SKU_ANALYTICS_METRICS = [
+    "revenue", "ordered_units", "delivered_units", "returns", "cancellations",
+    "hits_view_search", "hits_view_pdp", "hits_view",
+    "hits_tocart_search", "hits_tocart_pdp", "hits_tocart",
+    "session_view_search", "session_view_pdp", "conv_tocart_pdp",
+]
+
 
 class OzonSellerClient:
     base_url = "https://api-seller.ozon.ru"
@@ -23,14 +30,18 @@ class OzonSellerClient:
 
     async def post(self, path: str, payload: dict) -> dict:
         async with httpx.AsyncClient(timeout=45) as client:
-            for attempt in range(3):
+            attempts = 6 if path == "/v1/analytics/data" else 3
+            for attempt in range(attempts):
                 response = await client.post(f"{self.base_url}{path}", headers=self.headers, json=payload)
                 if response.status_code != 429:
                     response.raise_for_status()
                     return response.json()
-                if attempt == 2:
+                if attempt == attempts - 1:
                     response.raise_for_status()
-                wait_seconds = int(response.headers.get("Retry-After", 60))
+                try:
+                    wait_seconds = max(int(response.headers.get("Retry-After", 0)), 70)
+                except (TypeError, ValueError):
+                    wait_seconds = 70
                 logger.warning("Ozon rate limit reached; retrying after %s seconds", wait_seconds)
                 await asyncio.sleep(wait_seconds)
         raise RuntimeError("Ozon API request was not completed")
@@ -61,15 +72,23 @@ class OzonSellerClient:
             "date_to": date_to.isoformat(),
             # Seller Analytics accepts at most 14 metrics in one request. Keep
             # the finance movement and content funnel in the same SKU snapshot.
-            "metrics": [
-                "revenue", "ordered_units", "delivered_units", "returns", "cancellations",
-                "hits_view_search", "hits_view_pdp", "hits_view",
-                "hits_tocart_search", "hits_tocart_pdp", "hits_tocart",
-                "session_view_search", "session_view_pdp", "conv_tocart_pdp",
-            ],
+            "metrics": SKU_ANALYTICS_METRICS,
             "dimensions": ["day", "sku"],
             "filters": [],
             "sort": [{"key": "day", "order": "ASC"}],
+            "limit": 1000,
+            "offset": offset,
+        })
+
+    async def sku_analytics_snapshot(self, date_from: date, date_to: date, offset: int = 0) -> dict:
+        """Compact Premium Plus funnel grouped by SKU for one selected period."""
+        return await self.post("/v1/analytics/data", {
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
+            "metrics": SKU_ANALYTICS_METRICS,
+            "dimensions": ["sku"],
+            "filters": [],
+            "sort": [{"key": "revenue", "order": "DESC"}],
             "limit": 1000,
             "offset": offset,
         })
