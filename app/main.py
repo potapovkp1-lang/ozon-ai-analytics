@@ -1,4 +1,6 @@
 import asyncio
+import csv
+import io
 import secrets
 from contextlib import asynccontextmanager
 from datetime import date
@@ -13,11 +15,18 @@ from fastapi.staticfiles import StaticFiles
 from app.config import settings
 from app.services.costs import parse_cost_csv, template_csv
 from app.services.sync import sync_operational_data
-from app.services.storage import cost_template_products, dashboard as get_dashboard, import_cost_rows, initialise
+from app.services.storage import (
+    cost_template_products,
+    dashboard as get_dashboard,
+    import_cost_rows,
+    initialise,
+    photo_analytics as get_photo_analytics,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 scheduler = AsyncIOScheduler(timezone=settings.timezone)
 basic_auth = HTTPBasic()
+
 
 def gpt_authorized(authorization: str | None = Header(default=None)) -> None:
     if not settings.gpt_action_token:
@@ -74,6 +83,55 @@ async def public_dashboard_data(
         raise HTTPException(422, str(error)) from error
 
 
+@app.get("/api/public/photo-analytics", dependencies=[Depends(dashboard_authorized)])
+async def public_photo_analytics(
+    days: int = Query(default=30, ge=1, le=3650),
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+    search: str = Query(default="", max_length=200),
+):
+    try:
+        return get_photo_analytics(days=days, date_from=date_from, date_to=date_to, search=search)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+
+
+@app.get("/api/public/photo-analytics.csv", dependencies=[Depends(dashboard_authorized)])
+async def public_photo_analytics_csv(
+    days: int = Query(default=30, ge=1, le=3650),
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+    search: str = Query(default="", max_length=200),
+):
+    try:
+        data = get_photo_analytics(days=days, date_from=date_from, date_to=date_to, search=search)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    output = io.StringIO(newline="")
+    writer = csv.writer(output, delimiter=";")
+    writer.writerow([
+        "Артикул", "Ozon SKU", "Наименование", "Размер", "ШК",
+        "Показы в поиске и каталоге", "Просмотры карточки", "CTR, %",
+        "Поиск/каталог → карточка, %", "Карточка → избранное, %",
+        "Карточка → корзина, %", "Корзина → заказ, %", "Заказ → выкуп, %",
+        "Добавлено в корзину", "Заказано, шт.", "Выкуплено, шт.",
+    ])
+    for row in data["rows"]:
+        writer.writerow([
+            row["offer_id"], row["ozon_sku"], row["product_name"], row["size"], row["barcode"],
+            row["search_catalog_impressions"], row["views"], row["ctr"],
+            row["search_catalog_to_card"], row["card_to_favorite"], row["card_to_cart"],
+            row["cart_to_order"], row["order_to_buyout"], row["cart_additions"],
+            row["ordered_units"], row["retained_units"],
+        ])
+    filename = f"photo-analytics-{data['period']['date_from']}-{data['period']['date_to']}.csv"
+    return Response(
+        content=("\ufeff" + output.getvalue()).encode("utf-8"),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @app.get("/api/v1/dashboard", dependencies=[Depends(gpt_authorized)])
 async def dashboard_data(
     days: int = Query(default=30, ge=1, le=3650),
@@ -121,6 +179,3 @@ async def costs_import(request: Request):
     except ValueError as error:
         raise HTTPException(422, str(error)) from error
     return {"status": "ok", "imported": imported}
-
-
-
