@@ -773,6 +773,13 @@ def photo_analytics(
             ), cost_meta AS (
                 SELECT DISTINCT ON (ozon_sku) ozon_sku, offer_id, product_name
                 FROM sku_costs ORDER BY ozon_sku, valid_from DESC
+            ), finance AS (
+                SELECT ozon_sku,
+                       SUM(sales_units)::int AS sold_units,
+                       SUM(return_units)::int AS returned_units
+                FROM finance_sku_daily
+                WHERE day BETWEEN %s AND %s
+                GROUP BY ozon_sku
             )
             SELECT m.*,
                    COALESCE(NULLIF(p.offer_id, ''), NULLIF(c.offer_id, ''),
@@ -780,21 +787,38 @@ def photo_analytics(
                    COALESCE(NULLIF(p.product_name, ''), NULLIF(m.product_name, ''),
                             NULLIF(c.product_name, ''), s.product_name, '') AS display_name,
                    COALESCE(p.size, '') AS size,
-                   COALESCE(p.barcode, '') AS barcode
+                   COALESCE(p.barcode, '') AS barcode,
+                   COALESCE(f.sold_units, 0) AS finance_sold_units,
+                   COALESCE(f.returned_units, 0) AS finance_returned_units
             FROM metrics m
             LEFT JOIN product_catalog p ON p.ozon_sku = m.ozon_sku
             LEFT JOIN cost_meta c ON c.ozon_sku = m.ozon_sku
             LEFT JOIN stock_meta s ON s.ozon_sku = m.ozon_sku
+            LEFT JOIN finance f ON f.ozon_sku = m.ozon_sku
             WHERE %s = '%%' OR CONCAT_WS(' ', m.ozon_sku, p.offer_id, c.offer_id,
                                          s.offer_id, p.product_name, m.product_name) ILIKE %s
             ORDER BY m.hits_view_pdp DESC, m.hits_view_search DESC, offer_id
             LIMIT 1000
-        """, (start, end, needle, needle))
+        """, (start, end, start, end, needle, needle))
         source = cur.fetchall()
+        cur.execute("""
+            SELECT source, state, detail, last_attempt_at, last_success_at
+            FROM sync_state WHERE source = 'photo_analytics'
+        """)
+        sync_row = cur.fetchone()
 
+    traffic_available = any(
+        row["hits_view_search"] or row["hits_view_pdp"] or row["hits_tocart"]
+        for row in source
+    )
     rows = []
     for row in source:
-        retained_units = max(0, row["delivered_units"] - row["returned_units"])
+        finance_units_available = row["finance_sold_units"] > 0 or row["finance_returned_units"] > 0
+        retained_units = (
+            max(0, row["finance_sold_units"] - row["finance_returned_units"])
+            if finance_units_available
+            else max(0, row["delivered_units"] - row["returned_units"])
+        )
         search_to_card = _conversion(row["hits_view_pdp"], row["hits_view_search"])
         rows.append({
             "ozon_sku": row["ozon_sku"],
@@ -802,34 +826,34 @@ def photo_analytics(
             "product_name": row["display_name"],
             "size": row["size"],
             "barcode": row["barcode"],
-            "views": row["hits_view_pdp"],
-            "search_catalog_impressions": row["hits_view_search"],
-            "ctr": search_to_card,
-            "search_catalog_to_card": search_to_card,
+            "views": row["hits_view_pdp"] if traffic_available else None,
+            "search_catalog_impressions": row["hits_view_search"] if traffic_available else None,
+            "ctr": search_to_card if traffic_available else None,
+            "search_catalog_to_card": search_to_card if traffic_available else None,
             # Seller Analytics has no favorites metric. Keep the column explicit
             # instead of substituting a different event and misleading staff.
             "card_to_favorite": None,
-            "card_to_cart": _conversion(row["hits_tocart_pdp"], row["hits_view_pdp"]),
-            "cart_to_order": _conversion(row["ordered_units"], row["hits_tocart"]),
+            "card_to_cart": _conversion(row["hits_tocart_pdp"], row["hits_view_pdp"]) if traffic_available else None,
+            "cart_to_order": _conversion(row["ordered_units"], row["hits_tocart"]) if traffic_available else None,
             "order_to_buyout": _conversion(retained_units, row["ordered_units"]),
-            "cart_additions": row["hits_tocart"],
-            "card_cart_additions": row["hits_tocart_pdp"],
+            "cart_additions": row["hits_tocart"] if traffic_available else None,
+            "card_cart_additions": row["hits_tocart_pdp"] if traffic_available else None,
             "ordered_units": row["ordered_units"],
             "retained_units": retained_units,
         })
 
     totals = {
-        "views": sum(row["views"] for row in rows),
-        "search_catalog_impressions": sum(row["search_catalog_impressions"] for row in rows),
-        "cart_additions": sum(row["cart_additions"] for row in rows),
-        "card_cart_additions": sum(row["card_cart_additions"] for row in rows),
+        "views": sum(row["views"] or 0 for row in rows) if traffic_available else None,
+        "search_catalog_impressions": sum(row["search_catalog_impressions"] or 0 for row in rows) if traffic_available else None,
+        "cart_additions": sum(row["cart_additions"] or 0 for row in rows) if traffic_available else None,
+        "card_cart_additions": sum(row["card_cart_additions"] or 0 for row in rows) if traffic_available else None,
         "ordered_units": sum(row["ordered_units"] for row in rows),
         "retained_units": sum(row["retained_units"] for row in rows),
     }
     totals.update({
-        "ctr": _conversion(totals["views"], totals["search_catalog_impressions"]),
-        "card_to_cart": _conversion(totals["card_cart_additions"], totals["views"]),
-        "cart_to_order": _conversion(totals["ordered_units"], totals["cart_additions"]),
+        "ctr": _conversion(totals["views"], totals["search_catalog_impressions"]) if traffic_available else None,
+        "card_to_cart": _conversion(totals["card_cart_additions"], totals["views"]) if traffic_available else None,
+        "cart_to_order": _conversion(totals["ordered_units"], totals["cart_additions"]) if traffic_available else None,
         "order_to_buyout": _conversion(totals["retained_units"], totals["ordered_units"]),
     })
     return {
@@ -841,7 +865,14 @@ def photo_analytics(
         "rows": rows,
         "totals": totals,
         "favorites_available": False,
-        "data_available": any(row["search_catalog_impressions"] or row["views"] for row in rows),
+        "data_available": traffic_available,
+        "buyout_available": totals["retained_units"] > 0,
+        "source_status": {
+            "state": sync_row["state"] if sync_row else "waiting",
+            "detail": sync_row["detail"] if sync_row else "Ожидаем первую синхронизацию Ozon Analytics.",
+            "last_attempt_at": sync_row["last_attempt_at"].isoformat() if sync_row and sync_row["last_attempt_at"] else None,
+            "last_success_at": sync_row["last_success_at"].isoformat() if sync_row and sync_row["last_success_at"] else None,
+        },
     }
 
 
