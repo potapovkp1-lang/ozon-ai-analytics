@@ -46,7 +46,7 @@ class OzonSellerClient:
         return await self.post("/v1/analytics/data", {
             "date_from": date_from.isoformat(),
             "date_to": date_to.isoformat(),
-            "metrics": ["revenue", "ordered_units", "cancellations"],
+            "metrics": ["revenue", "ordered_units", "delivered_units", "returns", "cancellations"],
             "dimensions": ["day"],
             "filters": [],
             "sort": [{"key": "day", "order": "ASC"}],
@@ -59,7 +59,7 @@ class OzonSellerClient:
         return await self.post("/v1/analytics/data", {
             "date_from": date_from.isoformat(),
             "date_to": date_to.isoformat(),
-            "metrics": ["revenue", "ordered_units", "cancellations"],
+            "metrics": ["revenue", "ordered_units", "delivered_units", "returns", "cancellations"],
             "dimensions": ["day", "sku"],
             "filters": [],
             "sort": [{"key": "day", "order": "ASC"}],
