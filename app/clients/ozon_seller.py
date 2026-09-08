@@ -55,16 +55,31 @@ class OzonSellerClient:
         })
 
     async def sku_analytics(self, date_from: date, date_to: date, offset: int = 0) -> dict:
-        """Orders grouped by day and Ozon SKU for category reporting."""
+        """Orders and content funnel grouped by day and Ozon SKU."""
         return await self.post("/v1/analytics/data", {
             "date_from": date_from.isoformat(),
             "date_to": date_to.isoformat(),
-            "metrics": ["revenue", "ordered_units", "delivered_units", "returns", "cancellations"],
+            # Seller Analytics accepts at most 14 metrics in one request. Keep
+            # the finance movement and content funnel in the same SKU snapshot.
+            "metrics": [
+                "revenue", "ordered_units", "delivered_units", "returns", "cancellations",
+                "hits_view_search", "hits_view_pdp", "hits_view",
+                "hits_tocart_search", "hits_tocart_pdp", "hits_tocart",
+                "session_view_search", "session_view_pdp", "conv_tocart_pdp",
+            ],
             "dimensions": ["day", "sku"],
             "filters": [],
             "sort": [{"key": "day", "order": "ASC"}],
             "limit": 1000,
             "offset": offset,
+        })
+
+    async def product_attributes(self, last_id: str = "", limit: int = 1000) -> dict:
+        """Product article, barcode and characteristics for staff reports."""
+        return await self.post("/v4/product/info/attributes", {
+            "filter": {"visibility": "ALL"},
+            "limit": limit,
+            "last_id": last_id,
         })
 
     async def warehouse_stocks(self, limit: int = 1000, offset: int = 0) -> dict:
