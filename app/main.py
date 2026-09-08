@@ -19,7 +19,7 @@ from app.services.storage import cost_template_products, dashboard as get_dashbo
 ROOT = Path(__file__).resolve().parent.parent
 scheduler = AsyncIOScheduler(timezone=settings.timezone)
 basic_auth = HTTPBasic()
-ONE_TIME_IMPORT_TOKEN_HASH = "e2dc6f04a42f45f74cdd25ff9b05782ac5cf573235a8988acdb0807a81bb938b"
+ONE_TIME_IMPORT_TOKEN_HASH = "028a70889b0c1deafb2a2ce143e6b3de127d43536f24b686a84a109381ea294b"
 
 
 def gpt_authorized(authorization: str | None = Header(default=None)) -> None:
