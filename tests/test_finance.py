@@ -1,6 +1,14 @@
 from datetime import date
 
-from app.services.finance import aggregate_finance_operations, product_group, traffic_light, vat_part
+from app.services.finance import (
+    aggregate_finance_operations,
+    buyout_percent,
+    operation_fee_breakdown,
+    product_group,
+    traffic_light,
+    transaction_bucket,
+    vat_part,
+)
 
 
 def test_aggregate_sales_returns_fees_and_skus():
@@ -49,3 +57,50 @@ def test_product_group_prefers_explicit_value_and_avoids_guessing():
     assert product_group("Платье женское") == "women"
     assert product_group("Брюки", "мужское") == "men"
     assert product_group("Брюки") == "unknown"
+
+
+def test_service_adjustments_do_not_turn_into_returned_units():
+    operations = [{
+        "operation_date": "2026-09-01T10:00:00Z",
+        "type": "services",
+        "operation_type_name": "Услуги продвижения",
+        "accruals_for_sale": -1500,
+        "amount": -1500,
+        "items": [{"sku": 101, "name": "Брюки"}],
+    }]
+    daily, sku_daily = aggregate_finance_operations(operations)
+    row = daily[date(2026, 9, 1)]
+    assert row["sales_units"] == 0
+    assert row["return_units"] == 0
+    assert row["promotion"] == 1500
+    assert sku_daily == {}
+
+
+def test_ozon_fee_categories_and_transaction_buckets():
+    operation = {
+        "type": "orders",
+        "sale_commission": -400,
+        "delivery_charge": -100,
+        "services": [
+            {"name": "Услуга продвижения", "price": -50},
+            {"name": "Эквайринг", "price": -25},
+            {"name": "Размещение FBO", "price": -10},
+        ],
+    }
+    assert transaction_bucket(operation) == "sale"
+    assert transaction_bucket({"type": "returns"}) == "return"
+    assert transaction_bucket({"type": "services", "operation_type_name": "Комиссия"}) is None
+    assert operation_fee_breakdown(operation) == {
+        "reward": 400,
+        "delivery": 100,
+        "partner": 25,
+        "fbo": 10,
+        "promotion": 50,
+        "other": 0,
+    }
+
+
+def test_buyout_percent_is_net_sold_relative_to_ordered_units():
+    assert buyout_percent(100, 82, 7) == 75
+    assert buyout_percent(100, 10, 20) == 0
+    assert buyout_percent(0, 10, 0) is None
