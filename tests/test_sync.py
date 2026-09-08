@@ -66,6 +66,24 @@ def test_sku_analytics_requests_day_and_sku_dimensions():
     assert len(captured["metrics"]) == 14
 
 
+def test_sku_snapshot_requests_compact_premium_plus_report():
+    captured = {}
+    client = OzonSellerClient()
+
+    async def fake_post(path, payload):
+        captured["path"] = path
+        captured.update(payload)
+        return {"result": {"data": []}}
+
+    client.post = fake_post
+    asyncio.run(client.sku_analytics_snapshot(date(2026, 8, 9), date(2026, 9, 7)))
+    assert captured["path"] == "/v1/analytics/data"
+    assert captured["dimensions"] == ["sku"]
+    assert "hits_view_search" in captured["metrics"]
+    assert "hits_view_pdp" in captured["metrics"]
+    assert len(captured["metrics"]) == 14
+
+
 def test_finance_transactions_request_all_operations():
     captured = {}
     client = OzonSellerClient()
