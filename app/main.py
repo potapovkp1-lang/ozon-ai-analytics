@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import secrets
 from contextlib import asynccontextmanager
 from datetime import date
@@ -19,8 +18,6 @@ from app.services.storage import cost_template_products, dashboard as get_dashbo
 ROOT = Path(__file__).resolve().parent.parent
 scheduler = AsyncIOScheduler(timezone=settings.timezone)
 basic_auth = HTTPBasic()
-ONE_TIME_IMPORT_TOKEN_HASH = "028a70889b0c1deafb2a2ce143e6b3de127d43536f24b686a84a109381ea294b"
-
 
 def gpt_authorized(authorization: str | None = Header(default=None)) -> None:
     if not settings.gpt_action_token:
@@ -125,21 +122,3 @@ async def costs_import(request: Request):
         raise HTTPException(422, str(error)) from error
     return {"status": "ok", "imported": imported}
 
-
-@app.post("/api/admin/costs/import-once", include_in_schema=False)
-async def costs_import_once(request: Request, x_import_token: str | None = Header(default=None)):
-    """Temporary high-entropy, hash-verified importer; removed after this upload."""
-    supplied_hash = hashlib.sha256((x_import_token or "").encode()).hexdigest()
-    if not secrets.compare_digest(supplied_hash, ONE_TIME_IMPORT_TOKEN_HASH):
-        raise HTTPException(404, "Not found")
-    raw = await request.body()
-    try:
-        rows = parse_cost_csv(
-            raw,
-            default_purchase_vat=settings.default_purchase_vat_rate,
-            default_sale_vat=settings.default_sale_vat_rate,
-        )
-        imported = import_cost_rows(rows)
-    except ValueError as error:
-        raise HTTPException(422, str(error)) from error
-    return {"status": "ok", "imported": imported}
