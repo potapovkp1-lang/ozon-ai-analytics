@@ -254,6 +254,10 @@ def finance_needs_sku_backfill() -> bool:
         cur.execute("""
             SELECT EXISTS (SELECT 1 FROM daily_finance WHERE sales_amount > 0) AS has_finance,
                    EXISTS (SELECT 1 FROM finance_sku_daily WHERE sales_amount > 0) AS has_sku_amounts,
+                   NOT EXISTS (
+                       SELECT 1 FROM sync_state
+                       WHERE source = 'finance_units_v2' AND state = 'ready'
+                   ) AS missing_unit_deduplication,
                    EXISTS (
                        SELECT 1 FROM daily_finance
                        WHERE ozon_fees > 0
@@ -261,7 +265,11 @@ def finance_needs_sku_backfill() -> bool:
                    ) AS missing_fee_breakdown
         """)
         row = cur.fetchone()
-        return bool(row["has_finance"] and (not row["has_sku_amounts"] or row["missing_fee_breakdown"]))
+        return bool(row["has_finance"] and (
+            not row["has_sku_amounts"]
+            or row["missing_fee_breakdown"]
+            or row["missing_unit_deduplication"]
+        ))
 
 
 def set_sync_state(source: str, state: str, detail: str = "", *, success: bool = False) -> None:
@@ -545,7 +553,8 @@ def _category_breakdown(cur, date_from: date, date_to: date) -> tuple[list[dict]
         net_sales = group["sales_amount"] - group["return_amount"]
         net_units = max(0, group["sales_units"] - group["return_units"])
         coverage = group["priced_units"] / group["movement_units"] * 100 if group["movement_units"] else 0.0
-        costs_ready = group["movement_units"] > 0 and coverage >= 99.9
+        costs_ready = group["movement_units"] > 0 and coverage >= 95.0
+        costs_complete = coverage >= 99.9
         fees_net = group["ozon_fees"] - vat_part(group["ozon_fees"], settings.ozon_service_vat_rate)
         contribution_before_taxes = profit_before_tax = net_profit = None
         markup_before_tax = markup_after_tax = None
@@ -571,7 +580,7 @@ def _category_breakdown(cur, date_from: date, date_to: date) -> tuple[list[dict]
             "markup_before_tax": round(markup_before_tax, 1) if markup_before_tax is not None else None,
             "markup_after_tax": round(markup_after_tax, 1) if markup_after_tax is not None else None,
             "cost_coverage_percent": round(coverage, 1),
-            "status": traffic_light(markup_after_tax, good=20, warning=5) if costs_ready else "neutral",
+            "status": (traffic_light(markup_after_tax, good=20, warning=5) if costs_complete else "yellow") if costs_ready else "neutral",
         })
     unknown_units = groups["unknown"]["ordered_units"] + groups["unknown"]["sales_units"]
     return result, unknown_units, sum(group["output_vat"] for group in groups.values())
@@ -676,7 +685,8 @@ def dashboard(days: int = 30, date_from: date | None = None, date_to: date | Non
 
     movement_units = current["movement_units"]
     coverage = round(current["priced_units"] / movement_units * 100, 1) if movement_units else 0.0
-    costs_ready = movement_units > 0 and coverage >= 99.9
+    costs_ready = movement_units > 0 and coverage >= 95.0
+    costs_complete = coverage >= 99.9
     finance_ready = any(row["finance_present"] for row in current["rows"])
 
     net_sales_gross = current["sales_amount"] - current["return_amount"]
@@ -714,7 +724,10 @@ def dashboard(days: int = 30, date_from: date | None = None, date_to: date | Non
         f"Покрытие {coverage:g}% · без цены {missing_cost_units} движений"
         if movement_units else "Загрузите себестоимость по SKU"
     )
-    profit_note = f"Рентабельность {net_margin:.1f}%" if net_margin is not None else costs_note
+    profit_note = (
+        f"{'Предварительно · ' if not costs_complete else ''}рентабельность {net_margin:.1f}%"
+        if net_margin is not None else costs_note
+    )
 
     return_amount_status = "red" if previous["return_amount"] == 0 and current["return_amount"] > 0 else trend_status(current["return_amount"], previous["return_amount"], inverse=True)
     return_units_status = "red" if previous["return_units"] == 0 and current["return_units"] > 0 else trend_status(current["return_units"], previous["return_units"], inverse=True)
@@ -726,11 +739,11 @@ def dashboard(days: int = 30, date_from: date | None = None, date_to: date | Non
         _card("return_amount", "Возвраты", current["return_amount"] if finance_ready else None, "₽", return_amount_status if finance_ready else "neutral", _delta_note(current["return_amount"], previous["return_amount"], f"Доля возвратов {return_rate:.1f}%"), "Сумма возвратов и сторнированных начислений. Чем меньше, тем лучше.", percent=return_amount_share if finance_ready else None, percent_label="от продаж"),
         _card("return_units", "Возвращено товаров", current["return_units"] if finance_ready else None, "шт.", return_units_status if finance_ready else "neutral", _delta_note(current["return_units"], previous["return_units"], f"Доля возвратов {return_rate:.1f}%"), "Количество товаров в операциях возврата Ozon."),
         _card("ozon_fees", "Расходы Ozon", current["ozon_fees"] if finance_ready else None, "₽", "neutral" if not finance_ready else traffic_light(ozon_fees_share, good=25, warning=40, inverse=True), "Комиссии, логистика и услуги", "Все комиссии, логистика, эквайринг и другие удержания Ozon за период.", percent=ozon_fees_share, percent_label="от продаж после возвратов"),
-        _card("cogs", "Себестоимость продаж", current["cogs_gross"] if costs_ready else None, "₽", traffic_light(cogs_share, good=50, warning=70, inverse=True), costs_note, "Закупочная стоимость с НДС плюс дополнительные затраты без НДС, с учётом возвратов.", percent=cogs_share, percent_label="от продаж после возвратов"),
-        _card("net_profit", "Чистая прибыль", net_profit, "₽", traffic_light(net_margin, good=15, warning=5), profit_note, "Расчётная прибыль после расходов Ozon, НДС и налога на прибыль. Требует полной себестоимости.", percent=net_margin, percent_label="чистая рентабельность"),
+        _card("cogs", "Себестоимость продаж", current["cogs_gross"] if costs_ready else None, "₽", (traffic_light(cogs_share, good=50, warning=70, inverse=True) if costs_complete else "yellow") if costs_ready else "neutral", costs_note, "Закупочная стоимость с НДС плюс дополнительные затраты без НДС, с учётом возвратов.", percent=cogs_share, percent_label="от продаж после возвратов"),
+        _card("net_profit", "Чистая прибыль", net_profit, "₽", (traffic_light(net_margin, good=15, warning=5) if costs_complete else "yellow") if net_profit is not None else "neutral", profit_note, "Расчётная прибыль после расходов Ozon, НДС и налога на прибыль. При неполной себестоимости помечается как предварительная.", percent=net_margin, percent_label="чистая рентабельность"),
         _card("buyout_rate", "Процент выкупа", buyout_rate, "%", traffic_light(buyout_rate, good=80, warning=60), f"Выкуплено: {net_sold_units} из {current['ordered_units']} шт.", "Фактически проданные товары за вычетом возвратов относительно заказанных единиц."),
-        _card("markup_before_tax", "Наценка до налогов", markup_before_tax, "%", traffic_light(markup_before_tax, good=30, warning=10), "После себестоимости и всех расходов Ozon", "Продажи после возвратов минус себестоимость с НДС и все расходы Ozon, делённые на себестоимость с НДС."),
-        _card("markup_after_tax", "Наценка после налогов", markup_after_tax, "%", traffic_light(markup_after_tax, good=20, warning=5), f"НДС ≈ {blended_vat_rate:.1f}%, налог на прибыль {settings.income_tax_rate:g}%", "Чистая прибыль после расчётных НДС и налога на прибыль, делённая на себестоимость с НДС."),
+        _card("markup_before_tax", "Наценка до налогов", markup_before_tax, "%", (traffic_light(markup_before_tax, good=30, warning=10) if costs_complete else "yellow") if markup_before_tax is not None else "neutral", "После себестоимости и всех расходов Ozon", "Продажи после возвратов минус себестоимость с НДС и все расходы Ozon, делённые на себестоимость с НДС."),
+        _card("markup_after_tax", "Наценка после налогов", markup_after_tax, "%", (traffic_light(markup_after_tax, good=20, warning=5) if costs_complete else "yellow") if markup_after_tax is not None else "neutral", f"НДС ≈ {blended_vat_rate:.1f}%, налог на прибыль {settings.income_tax_rate:g}%", "Чистая прибыль после расчётных НДС и налога на прибыль, делённая на себестоимость с НДС."),
     ]
 
     insights = []
@@ -738,6 +751,8 @@ def dashboard(days: int = 30, date_from: date | None = None, date_to: date | Non
         insights.append({"status": "yellow", "title": "Финансовые данные загружаются", "text": "Продажи, возвраты и расходы Ozon появятся после финансовой синхронизации."})
     if not costs_ready:
         insights.append({"status": "yellow", "title": "Нужна себестоимость", "text": "Загрузите CSV по Ozon SKU, чтобы рассчитать прибыль и наценку."})
+    elif not costs_complete:
+        insights.append({"status": "yellow", "title": "Прибыль предварительная", "text": f"Не хватает себестоимости для {missing_cost_units} движений. Остальные данные уже включены в расчёт."})
     if unclassified_units:
         insights.append({"status": "yellow", "title": "Есть товары без категории", "text": f"Не распределено движений: {unclassified_units}. Укажите категорию в CSV себестоимости."})
     if not warehouses:
