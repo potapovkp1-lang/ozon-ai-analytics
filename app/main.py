@@ -122,7 +122,7 @@ async def public_photo_analytics_csv(
             row["search_catalog_impressions"], row["views"], row["ctr"],
             row["search_catalog_to_card"], row["card_to_favorite"], row["card_to_cart"],
             row["cart_to_order"], row["order_to_buyout"], row["cart_additions"],
-            row["ordered_units"], row["retained_units"],
+            row["ordered_units"], row["sold_units"],
         ])
     filename = f"photo-analytics-{data['period']['date_from']}-{data['period']['date_to']}.csv"
     return Response(
