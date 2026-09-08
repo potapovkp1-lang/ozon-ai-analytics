@@ -101,9 +101,9 @@ def test_ozon_fee_categories_and_transaction_buckets():
     }
 
 
-def test_buyout_percent_is_purchased_relative_to_delivered_units():
-    assert buyout_percent(100, 7) == 93
-    assert buyout_percent(10, 20) == 0
+def test_buyout_percent_is_sold_relative_to_ordered_units():
+    assert buyout_percent(84, 100) == 84
+    assert buyout_percent(20, 10) == 100
     assert buyout_percent(0, 0) is None
 
 
