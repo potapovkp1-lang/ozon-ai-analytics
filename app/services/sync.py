@@ -14,6 +14,7 @@ from app.services.storage import (
     replace_analytics_sku_period,
     replace_finance_period,
     replace_inventory_snapshot,
+    replace_product_catalog,
     set_sync_state,
     upsert_daily_metric,
 )
@@ -41,6 +42,43 @@ def dimension_value(dimension: object) -> tuple[str, str]:
     if isinstance(dimension, dict):
         return str(dimension.get("id") or ""), str(dimension.get("name") or "")
     return str(dimension or ""), ""
+
+
+def product_catalog_row(item: dict) -> dict | None:
+    """Extract stable staff-facing metadata from a product attribute row."""
+    sku = str(item.get("sku") or "")
+    if not sku:
+        for source in item.get("sources") or []:
+            if source.get("sku"):
+                sku = str(source["sku"])
+                break
+    if not sku:
+        return None
+    raw_barcodes = item.get("barcodes") or item.get("barcode") or []
+    if isinstance(raw_barcodes, str):
+        barcode = raw_barcodes
+    else:
+        barcode = str(next((value for value in raw_barcodes if value), ""))
+    size = ""
+    candidates: list[tuple[int, str]] = []
+    for attribute in item.get("attributes") or []:
+        name = str(attribute.get("name") or "").strip().lower()
+        if "размер" not in name or any(token in name for token in ("упаков", "изображ", "габарит")):
+            continue
+        values = [str(value.get("value") or value.get("dictionary_value_id") or "").strip()
+                  for value in attribute.get("values") or []]
+        value = ", ".join(value for value in values if value)
+        if value:
+            candidates.append((0 if name == "размер" else 1, value))
+    if candidates:
+        size = sorted(candidates)[0][1]
+    return {
+        "ozon_sku": sku,
+        "offer_id": str(item.get("offer_id") or ""),
+        "product_name": str(item.get("name") or ""),
+        "size": size,
+        "barcode": barcode,
+    }
 
 
 async def sync_operational_data() -> None:
@@ -144,6 +182,15 @@ async def sync_sku_analytics(client: OzonSellerClient, date_from: date, date_to:
                     "delivered_units": int(metric_number(metrics[2])) if len(metrics) > 2 else 0,
                     "returned_units": int(metric_number(metrics[3])) if len(metrics) > 3 else 0,
                     "canceled_units": int(metric_number(metrics[4])) if len(metrics) > 4 else 0,
+                    "hits_view_search": int(metric_number(metrics[5])) if len(metrics) > 5 else 0,
+                    "hits_view_pdp": int(metric_number(metrics[6])) if len(metrics) > 6 else 0,
+                    "hits_view": int(metric_number(metrics[7])) if len(metrics) > 7 else 0,
+                    "hits_tocart_search": int(metric_number(metrics[8])) if len(metrics) > 8 else 0,
+                    "hits_tocart_pdp": int(metric_number(metrics[9])) if len(metrics) > 9 else 0,
+                    "hits_tocart": int(metric_number(metrics[10])) if len(metrics) > 10 else 0,
+                    "session_view_search": int(metric_number(metrics[11])) if len(metrics) > 11 else 0,
+                    "session_view_pdp": int(metric_number(metrics[12])) if len(metrics) > 12 else 0,
+                    "conv_tocart_pdp": metric_number(metrics[13]) if len(metrics) > 13 else None,
                 })
             except (TypeError, ValueError, IndexError):
                 continue
@@ -167,8 +214,36 @@ def current_price(item: dict) -> float:
     return 0.0
 
 
+async def sync_product_catalog(client: OzonSellerClient) -> int:
+    products: list[dict] = []
+    last_id = ""
+    seen_product_cursors: set[str] = set()
+    while True:
+        payload = await client.product_attributes(last_id=last_id)
+        raw_result = payload.get("result") or []
+        items = raw_result.get("items", []) if isinstance(raw_result, dict) else raw_result
+        products.extend(row for item in items if (row := product_catalog_row(item)))
+        next_last_id = str(payload.get("last_id") or (raw_result.get("last_id") if isinstance(raw_result, dict) else "") or "")
+        if len(items) < 1000 or not next_last_id or next_last_id in seen_product_cursors:
+            break
+        seen_product_cursors.add(next_last_id)
+        last_id = next_last_id
+    if products:
+        replace_product_catalog(products)
+    return len(products)
+
+
 async def sync_inventory_source(client: OzonSellerClient) -> None:
     set_sync_state("inventory", "syncing", "Загружаем остатки FBO и текущие цены")
+    product_count = 0
+    try:
+        product_count = await sync_product_catalog(client)
+        set_sync_state("catalog", "ready", f"Карточки товаров: {product_count}", success=True)
+    except Exception as error:
+        # Product metadata enriches the staff table but must never block stock
+        # and price updates used by the management dashboard.
+        set_sync_state("catalog", "error", sync_error_detail(error))
+        logger.warning("Ozon product catalog sync deferred: %s", type(error).__name__)
     try:
         prices: dict[str, float] = {}
         cursor = ""
@@ -200,7 +275,7 @@ async def sync_inventory_source(client: OzonSellerClient) -> None:
         set_sync_state("inventory", "error", sync_error_detail(error))
         logger.warning("Ozon inventory sync deferred: %s", type(error).__name__)
         return
-    set_sync_state("inventory", "ready", f"Остатки FBO: {len(stocks)} строк", success=True)
+    set_sync_state("inventory", "ready", f"Остатки FBO: {len(stocks)} строк · карточки: {product_count}", success=True)
 
 
 async def sync_finance_source(client: OzonSellerClient, today: date) -> None:
@@ -219,6 +294,7 @@ async def sync_finance_source(client: OzonSellerClient, today: date) -> None:
     set_sync_state("finance", "ready", f"Финансовые операции обновлены: {operation_count}", success=True)
     if full_backfill:
         set_sync_state("finance_units_v3", "ready", "Продажи и возвраты пересчитаны без служебных операций", success=True)
+        set_sync_state("finance_funding_v1", "ready", "Займы и факторинг отделены от расходов Ozon", success=True)
 
 
 async def sync_finance_data(client: OzonSellerClient, date_from: date, date_to: date) -> int:
