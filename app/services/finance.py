@@ -195,7 +195,7 @@ def aggregate_finance_operations(operations: Iterable[dict]) -> tuple[dict[date,
                 sku_daily[(day, sku)]["sales_amount"] += amount_per_item
                 sku_daily[(day, sku)]["ozon_fees"] += fee_per_item
                 sku_daily[(day, sku)]["product_name"] = product_name
-        elif bucket == "return" and skus:
+        elif bucket == "return" and skus and accrual < 0:
             row["return_amount"] += abs(accrual)
             row["return_units"] += sum(1 for _, _, is_new in movement_items if is_new)
             for sku, product_name, is_new in movement_items:
