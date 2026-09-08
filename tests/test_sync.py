@@ -2,7 +2,7 @@ from datetime import date
 import asyncio
 
 from app.clients.ozon_seller import OzonSellerClient
-from app.services.sync import finance_chunks, metric_number, product_catalog_row, report_day
+from app.services.sync import analytics_chunks, finance_chunks, metric_number, product_catalog_row, report_day
 
 
 def test_parse_report_day_from_ozon_dimension():
@@ -87,3 +87,10 @@ def test_finance_backfill_starts_with_newest_period():
     assert chunks[0] == (date(2026, 8, 3), date(2026, 9, 2))
     assert chunks[-1][0] == date(2026, 6, 2)
     assert all((end - start).days <= 30 for start, end in chunks)
+
+
+def test_analytics_backfill_starts_with_latest_seven_days():
+    chunks = analytics_chunks(date(2026, 8, 1), date(2026, 9, 2))
+    assert chunks[0] == (date(2026, 8, 27), date(2026, 9, 2))
+    assert chunks[-1] == (date(2026, 8, 1), date(2026, 8, 5))
+    assert all((end - start).days <= 6 for start, end in chunks)
