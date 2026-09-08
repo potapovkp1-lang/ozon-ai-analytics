@@ -3,6 +3,7 @@ from datetime import date
 from app.services.finance import (
     aggregate_finance_operations,
     buyout_percent,
+    financing_category,
     operation_fee_breakdown,
     product_group,
     traffic_light,
@@ -146,3 +147,32 @@ def test_return_logistics_without_sale_reversal_is_not_a_returned_unit():
     daily, sku_daily = aggregate_finance_operations(operations)
     assert daily[date(2026, 9, 1)]["return_units"] == 0
     assert sku_daily == {}
+
+
+def test_loans_and_factoring_are_separate_from_ozon_expenses():
+    operations = [
+        {
+            "operation_date": "2026-09-01T10:00:00Z", "type": "orders",
+            "operation_type_name": "Доставка покупателю", "accruals_for_sale": 3000,
+            "amount": 2200, "sale_commission": -500,
+            "services": [{"name": "Доставка", "price": -300}],
+            "items": [{"sku": 101}],
+        },
+        {
+            "operation_date": "2026-09-01T11:00:00Z", "type": "services",
+            "operation_type": "LoanPayment", "operation_type_name": "Погашение займа",
+            "amount": -1000,
+        },
+        {
+            "operation_date": "2026-09-01T12:00:00Z", "type": "services",
+            "operation_type": "FactoringPayment", "operation_type_name": "Факторинг",
+            "amount": 500,
+        },
+    ]
+    daily, _ = aggregate_finance_operations(operations)
+    row = daily[date(2026, 9, 1)]
+    assert row["ozon_fees"] == 800
+    assert row["loan"] == -1000
+    assert row["factoring"] == 500
+    assert financing_category(operations[1]) == "loan"
+    assert financing_category(operations[2]) == "factoring"
