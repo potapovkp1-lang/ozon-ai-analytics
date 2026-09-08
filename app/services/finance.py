@@ -35,6 +35,8 @@ def operation_items(operation: dict) -> list[tuple[str, str]]:
 
 def operation_fees(operation: dict) -> float:
     """Return Ozon deductions as a positive number without double counting."""
+    if financing_category(operation):
+        return 0.0
     components = [
         number(operation.get("sale_commission")),
         number(operation.get("delivery_charge")),
@@ -51,6 +53,19 @@ def operation_fees(operation: dict) -> float:
 
 
 EXPENSE_KEYS = ("reward", "delivery", "partner", "fbo", "promotion", "other")
+FINANCING_KEYS = ("loan", "factoring")
+
+
+def financing_category(operation: dict) -> str | None:
+    """Identify financing movements that must not be treated as Ozon costs."""
+    label = " ".join(str(operation.get(key) or "") for key in (
+        "type", "operation_type", "operation_type_name",
+    )).lower()
+    if any(token in label for token in ("factoring", "factor", "факторинг", "фактор")):
+        return "factoring"
+    if any(token in label for token in ("loan", "заем", "заём", "займ")):
+        return "loan"
+    return None
 
 
 def transaction_bucket(operation: dict) -> str | None:
@@ -97,6 +112,8 @@ def expense_category(name: str) -> str:
 def operation_fee_breakdown(operation: dict) -> dict[str, float]:
     """Split one Ozon deduction into management-reporting categories."""
     result = {key: 0.0 for key in EXPENSE_KEYS}
+    if financing_category(operation):
+        return result
     sale_commission = number(operation.get("sale_commission"))
     if sale_commission < 0:
         result["reward"] += abs(sale_commission)
@@ -154,6 +171,7 @@ def aggregate_finance_operations(operations: Iterable[dict]) -> tuple[dict[date,
         "sales_units": 0,
         "return_units": 0,
         **{key: 0.0 for key in EXPENSE_KEYS},
+        **{key: 0.0 for key in FINANCING_KEYS},
     })
     sku_daily: dict[tuple[date, str], dict] = defaultdict(lambda: {
         "sales_units": 0, "return_units": 0, "sales_amount": 0.0,
@@ -167,6 +185,12 @@ def aggregate_finance_operations(operations: Iterable[dict]) -> tuple[dict[date,
         except (TypeError, ValueError):
             continue
         row = daily[day]
+        financing = financing_category(operation)
+        if financing:
+            movement = number(operation.get("amount"))
+            row[financing] += movement
+            row["net_payout"] += movement
+            continue
         accrual = number(operation.get("accruals_for_sale"))
         bucket = transaction_bucket(operation)
         items = operation_items(operation)
@@ -214,7 +238,10 @@ def aggregate_finance_operations(operations: Iterable[dict]) -> tuple[dict[date,
     # amounts captures commissions, logistics and other Ozon adjustments once.
     # Prefer it to individual service fields, which can overlap in API versions.
     for row in daily.values():
-        implied_deductions = row["sales_amount"] - row["return_amount"] - row["net_payout"]
+        # Financing changes the cash transfer from Ozon but is not a marketplace
+        # commission or service. Remove it before reconciling operational costs.
+        operational_payout = row["net_payout"] - sum(row[key] for key in FINANCING_KEYS)
+        implied_deductions = row["sales_amount"] - row["return_amount"] - operational_payout
         if implied_deductions >= 0:
             row["ozon_fees"] = implied_deductions
             component_total = sum(row[key] for key in EXPENSE_KEYS)
