@@ -24,6 +24,7 @@ def test_daily_analytics_requests_day_dimensions():
     client.post = fake_post
     asyncio.run(client.daily_analytics(date(2026, 8, 1), date(2026, 8, 2)))
     assert captured["dimensions"] == ["day"]
+    assert captured["metrics"] == ["revenue", "ordered_units", "delivered_units", "returns", "cancellations"]
     assert "dimension" not in captured
 
 
@@ -40,6 +41,7 @@ def test_sku_analytics_requests_day_and_sku_dimensions():
     asyncio.run(client.sku_analytics(date(2026, 8, 1), date(2026, 8, 2)))
     assert captured["path"] == "/v1/analytics/data"
     assert captured["dimensions"] == ["day", "sku"]
+    assert captured["metrics"] == ["revenue", "ordered_units", "delivered_units", "returns", "cancellations"]
 
 
 def test_finance_transactions_request_all_operations():
