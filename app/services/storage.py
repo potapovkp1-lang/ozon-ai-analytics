@@ -9,7 +9,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from app.config import settings
-from app.services.finance import EXPENSE_KEYS, buyout_percent, percent_change, product_group, traffic_light, trend_status, vat_part
+from app.services.finance import FINANCING_KEYS, EXPENSE_KEYS, buyout_percent, percent_change, product_group, traffic_light, trend_status, vat_part
 
 
 @contextmanager
@@ -51,10 +51,14 @@ def initialise() -> None:
                 fbo NUMERIC(14, 2) NOT NULL DEFAULT 0,
                 promotion NUMERIC(14, 2) NOT NULL DEFAULT 0,
                 other NUMERIC(14, 2) NOT NULL DEFAULT 0,
+                loan NUMERIC(14, 2) NOT NULL DEFAULT 0,
+                factoring NUMERIC(14, 2) NOT NULL DEFAULT 0,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
             )
         """)
         for column in EXPENSE_KEYS:
+            cur.execute(f"ALTER TABLE daily_finance ADD COLUMN IF NOT EXISTS {column} NUMERIC(14, 2) NOT NULL DEFAULT 0")
+        for column in FINANCING_KEYS:
             cur.execute(f"ALTER TABLE daily_finance ADD COLUMN IF NOT EXISTS {column} NUMERIC(14, 2) NOT NULL DEFAULT 0")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS finance_sku_daily (
@@ -83,11 +87,26 @@ def initialise() -> None:
                 delivered_units INTEGER NOT NULL DEFAULT 0,
                 returned_units INTEGER NOT NULL DEFAULT 0,
                 canceled_units INTEGER NOT NULL DEFAULT 0,
+                hits_view_search INTEGER NOT NULL DEFAULT 0,
+                hits_view_pdp INTEGER NOT NULL DEFAULT 0,
+                hits_view INTEGER NOT NULL DEFAULT 0,
+                hits_tocart_search INTEGER NOT NULL DEFAULT 0,
+                hits_tocart_pdp INTEGER NOT NULL DEFAULT 0,
+                hits_tocart INTEGER NOT NULL DEFAULT 0,
+                session_view_search INTEGER NOT NULL DEFAULT 0,
+                session_view_pdp INTEGER NOT NULL DEFAULT 0,
+                conv_tocart_pdp NUMERIC(8, 3),
                 PRIMARY KEY (day, ozon_sku)
             )
         """)
         cur.execute("ALTER TABLE analytics_sku_daily ADD COLUMN IF NOT EXISTS delivered_units INTEGER NOT NULL DEFAULT 0")
         cur.execute("ALTER TABLE analytics_sku_daily ADD COLUMN IF NOT EXISTS returned_units INTEGER NOT NULL DEFAULT 0")
+        for column in (
+            "hits_view_search", "hits_view_pdp", "hits_view", "hits_tocart_search",
+            "hits_tocart_pdp", "hits_tocart", "session_view_search", "session_view_pdp",
+        ):
+            cur.execute(f"ALTER TABLE analytics_sku_daily ADD COLUMN IF NOT EXISTS {column} INTEGER NOT NULL DEFAULT 0")
+        cur.execute("ALTER TABLE analytics_sku_daily ADD COLUMN IF NOT EXISTS conv_tocart_pdp NUMERIC(8, 3)")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS sku_costs (
                 ozon_sku TEXT NOT NULL,
@@ -104,6 +123,16 @@ def initialise() -> None:
             )
         """)
         cur.execute("ALTER TABLE sku_costs ADD COLUMN IF NOT EXISTS product_group TEXT NOT NULL DEFAULT ''")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS product_catalog (
+                ozon_sku TEXT PRIMARY KEY,
+                offer_id TEXT NOT NULL DEFAULT '',
+                product_name TEXT NOT NULL DEFAULT '',
+                size TEXT NOT NULL DEFAULT '',
+                barcode TEXT NOT NULL DEFAULT '',
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        """)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS warehouse_stocks (
                 warehouse_name TEXT NOT NULL,
@@ -181,8 +210,8 @@ def replace_finance_period(
                 INSERT INTO daily_finance (
                     day, sales_amount, return_amount, ozon_fees, net_payout,
                     sales_units, return_units, reward, delivery, partner, fbo,
-                    promotion, other, updated_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                    promotion, other, loan, factoring, updated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
             """, (
                 current,
                 row.get("sales_amount", 0), row.get("return_amount", 0),
@@ -191,6 +220,7 @@ def replace_finance_period(
                 row.get("reward", 0), row.get("delivery", 0),
                 row.get("partner", 0), row.get("fbo", 0),
                 row.get("promotion", 0), row.get("other", 0),
+                row.get("loan", 0), row.get("factoring", 0),
             ))
             current += timedelta(days=1)
         if sku_daily:
@@ -219,13 +249,21 @@ def replace_analytics_sku_period(date_from: date, date_to: date, rows: Iterable[
             cur.executemany("""
                 INSERT INTO analytics_sku_daily (
                     day, ozon_sku, product_name, ordered_amount, ordered_units,
-                    delivered_units, returned_units, canceled_units
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    delivered_units, returned_units, canceled_units,
+                    hits_view_search, hits_view_pdp, hits_view,
+                    hits_tocart_search, hits_tocart_pdp, hits_tocart,
+                    session_view_search, session_view_pdp, conv_tocart_pdp
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, [(
                 row["day"], row["ozon_sku"], row.get("product_name", ""),
                 row.get("ordered_amount", 0), row.get("ordered_units", 0),
                 row.get("delivered_units", 0), row.get("returned_units", 0),
                 row.get("canceled_units", 0),
+                row.get("hits_view_search", 0), row.get("hits_view_pdp", 0),
+                row.get("hits_view", 0), row.get("hits_tocart_search", 0),
+                row.get("hits_tocart_pdp", 0), row.get("hits_tocart", 0),
+                row.get("session_view_search", 0), row.get("session_view_pdp", 0),
+                row.get("conv_tocart_pdp"),
             ) for row in prepared])
         conn.commit()
 
@@ -255,6 +293,24 @@ def replace_inventory_snapshot(rows: Iterable[dict], prices: dict[str, float]) -
         conn.commit()
 
 
+def replace_product_catalog(rows: Iterable[dict]) -> None:
+    """Replace the read-only product metadata used by the photo team."""
+    prepared = [row for row in rows if str(row.get("ozon_sku") or "")]
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute("DELETE FROM product_catalog")
+        if prepared:
+            cur.executemany("""
+                INSERT INTO product_catalog (
+                    ozon_sku, offer_id, product_name, size, barcode, updated_at
+                ) VALUES (%s, %s, %s, %s, %s, now())
+            """, [(
+                str(row["ozon_sku"]), str(row.get("offer_id") or ""),
+                str(row.get("product_name") or ""), str(row.get("size") or ""),
+                str(row.get("barcode") or ""),
+            ) for row in prepared])
+        conn.commit()
+
+
 def finance_has_data() -> bool:
     with connection() as conn, conn.cursor() as cur:
         cur.execute("SELECT EXISTS (SELECT 1 FROM daily_finance) AS present")
@@ -279,6 +335,10 @@ def finance_needs_sku_backfill() -> bool:
                        SELECT 1 FROM sync_state
                        WHERE source = 'finance_units_v3' AND state = 'ready'
                    ) AS missing_unit_deduplication,
+                   NOT EXISTS (
+                       SELECT 1 FROM sync_state
+                       WHERE source = 'finance_funding_v1' AND state = 'ready'
+                   ) AS missing_funding_split,
                    EXISTS (
                        SELECT 1 FROM daily_finance
                        WHERE ozon_fees > 0
@@ -290,6 +350,7 @@ def finance_needs_sku_backfill() -> bool:
             not row["has_sku_amounts"]
             or row["missing_fee_breakdown"]
             or row["missing_unit_deduplication"]
+            or row["missing_funding_split"]
         ))
 
 
@@ -389,6 +450,8 @@ def _period_rows(cur, date_from: date, date_to: date) -> list[dict]:
             COALESCE(f.fbo, 0)::float AS fbo,
             COALESCE(f.promotion, 0)::float AS promotion,
             COALESCE(f.other, 0)::float AS other,
+            COALESCE(f.loan, 0)::float AS loan,
+            COALESCE(f.factoring, 0)::float AS factoring,
             (f.day IS NOT NULL) AS finance_present
         FROM daily_metrics m
         FULL OUTER JOIN daily_finance f ON f.day = m.day
@@ -467,6 +530,7 @@ def _snapshot(cur, date_from: date, date_to: date) -> dict:
         "ozon_fees": sum(row["ozon_fees"] for row in rows),
         "net_payout": sum(row["net_payout"] for row in rows),
         **{key: sum(row[key] for row in rows) for key in EXPENSE_KEYS},
+        **{key: sum(row[key] for row in rows) for key in FINANCING_KEYS},
     }
     totals.update(costs)
     totals["rows"] = rows
@@ -665,6 +729,122 @@ def _warehouse_breakdown(cur) -> tuple[list[dict], str | None]:
     return result, latest.isoformat() if latest else None
 
 
+def _conversion(numerator: float, denominator: float) -> float | None:
+    if denominator <= 0:
+        return None
+    return round(max(0.0, min(100.0, numerator / denominator * 100)), 1)
+
+
+def photo_analytics(
+    days: int = 30,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    search: str = "",
+) -> dict:
+    """Return a SKU funnel tailored for the employee responsible for photos."""
+    today = date.today()
+    end = date_to or (today - timedelta(days=1))
+    start = date_from or (end - timedelta(days=max(1, days) - 1))
+    if start > end:
+        raise ValueError("Дата начала не может быть позже даты окончания")
+    needle = f"%{search.strip()}%"
+    with connection() as conn, conn.cursor() as cur:
+        cur.execute("""
+            WITH metrics AS (
+                SELECT ozon_sku, MAX(product_name) AS product_name,
+                       SUM(ordered_units)::int AS ordered_units,
+                       SUM(delivered_units)::int AS delivered_units,
+                       SUM(returned_units)::int AS returned_units,
+                       SUM(hits_view_search)::int AS hits_view_search,
+                       SUM(hits_view_pdp)::int AS hits_view_pdp,
+                       SUM(hits_view)::int AS hits_view,
+                       SUM(hits_tocart_search)::int AS hits_tocart_search,
+                       SUM(hits_tocart_pdp)::int AS hits_tocart_pdp,
+                       SUM(hits_tocart)::int AS hits_tocart,
+                       SUM(session_view_search)::int AS session_view_search,
+                       SUM(session_view_pdp)::int AS session_view_pdp
+                FROM analytics_sku_daily
+                WHERE day BETWEEN %s AND %s
+                GROUP BY ozon_sku
+            ), stock_meta AS (
+                SELECT ozon_sku, MAX(offer_id) AS offer_id,
+                       MAX(product_name) AS product_name
+                FROM warehouse_stocks GROUP BY ozon_sku
+            ), cost_meta AS (
+                SELECT DISTINCT ON (ozon_sku) ozon_sku, offer_id, product_name
+                FROM sku_costs ORDER BY ozon_sku, valid_from DESC
+            )
+            SELECT m.*,
+                   COALESCE(NULLIF(p.offer_id, ''), NULLIF(c.offer_id, ''),
+                            NULLIF(s.offer_id, ''), m.ozon_sku) AS offer_id,
+                   COALESCE(NULLIF(p.product_name, ''), NULLIF(m.product_name, ''),
+                            NULLIF(c.product_name, ''), s.product_name, '') AS display_name,
+                   COALESCE(p.size, '') AS size,
+                   COALESCE(p.barcode, '') AS barcode
+            FROM metrics m
+            LEFT JOIN product_catalog p ON p.ozon_sku = m.ozon_sku
+            LEFT JOIN cost_meta c ON c.ozon_sku = m.ozon_sku
+            LEFT JOIN stock_meta s ON s.ozon_sku = m.ozon_sku
+            WHERE %s = '%%' OR CONCAT_WS(' ', m.ozon_sku, p.offer_id, c.offer_id,
+                                         s.offer_id, p.product_name, m.product_name) ILIKE %s
+            ORDER BY m.hits_view_pdp DESC, m.hits_view_search DESC, offer_id
+            LIMIT 1000
+        """, (start, end, needle, needle))
+        source = cur.fetchall()
+
+    rows = []
+    for row in source:
+        retained_units = max(0, row["delivered_units"] - row["returned_units"])
+        search_to_card = _conversion(row["hits_view_pdp"], row["hits_view_search"])
+        rows.append({
+            "ozon_sku": row["ozon_sku"],
+            "offer_id": row["offer_id"],
+            "product_name": row["display_name"],
+            "size": row["size"],
+            "barcode": row["barcode"],
+            "views": row["hits_view_pdp"],
+            "search_catalog_impressions": row["hits_view_search"],
+            "ctr": search_to_card,
+            "search_catalog_to_card": search_to_card,
+            # Seller Analytics has no favorites metric. Keep the column explicit
+            # instead of substituting a different event and misleading staff.
+            "card_to_favorite": None,
+            "card_to_cart": _conversion(row["hits_tocart_pdp"], row["hits_view_pdp"]),
+            "cart_to_order": _conversion(row["ordered_units"], row["hits_tocart"]),
+            "order_to_buyout": _conversion(retained_units, row["ordered_units"]),
+            "cart_additions": row["hits_tocart"],
+            "card_cart_additions": row["hits_tocart_pdp"],
+            "ordered_units": row["ordered_units"],
+            "retained_units": retained_units,
+        })
+
+    totals = {
+        "views": sum(row["views"] for row in rows),
+        "search_catalog_impressions": sum(row["search_catalog_impressions"] for row in rows),
+        "cart_additions": sum(row["cart_additions"] for row in rows),
+        "card_cart_additions": sum(row["card_cart_additions"] for row in rows),
+        "ordered_units": sum(row["ordered_units"] for row in rows),
+        "retained_units": sum(row["retained_units"] for row in rows),
+    }
+    totals.update({
+        "ctr": _conversion(totals["views"], totals["search_catalog_impressions"]),
+        "card_to_cart": _conversion(totals["card_cart_additions"], totals["views"]),
+        "cart_to_order": _conversion(totals["ordered_units"], totals["cart_additions"]),
+        "order_to_buyout": _conversion(totals["retained_units"], totals["ordered_units"]),
+    })
+    return {
+        "period": {
+            "date_from": start.isoformat(), "date_to": end.isoformat(),
+            "days": (end - start).days + 1,
+        },
+        "search": search.strip(),
+        "rows": rows,
+        "totals": totals,
+        "favorites_available": False,
+        "data_available": any(row["search_catalog_impressions"] or row["views"] for row in rows),
+    }
+
+
 def _delta_note(current: float, previous: float, fallback: str) -> str:
     change = percent_change(current, previous)
     if change is None:
@@ -777,7 +957,7 @@ def dashboard(days: int = 30, date_from: date | None = None, date_to: date | Non
         _card("sales_units", "Продано товаров", gross_sold_units if analytics_units_ready or finance_ready else None, "шт.", trend_status(gross_sold_units, previous_gross_sold_units) if analytics_units_ready or finance_ready else "neutral", _delta_note(gross_sold_units, previous_gross_sold_units, "По данным Ozon Analytics"), "Количество доставленных покупателям товаров до последующих возвратов."),
         _card("return_amount", "Возвраты", current["return_amount"] if finance_ready else None, "₽", return_amount_status if finance_ready else "neutral", _delta_note(current["return_amount"], previous["return_amount"], f"Доля возвратов {return_rate:.1f}%"), "Сумма возвратов и сторнированных начислений. Чем меньше, тем лучше.", percent=return_amount_share if finance_ready else None, percent_label="от продаж"),
         _card("return_units", "Возвращено товаров", returned_units if analytics_units_ready or finance_ready else None, "шт.", return_units_status if analytics_units_ready or finance_ready else "neutral", _delta_note(returned_units, previous_returned_units, f"Доля возвратов {return_rate:.1f}%"), "Количество возвращённых единиц из единого отчёта Ozon Analytics."),
-        _card("ozon_fees", "Расходы Ozon", current["ozon_fees"] if finance_ready else None, "₽", "neutral" if not finance_ready else traffic_light(ozon_fees_share, good=25, warning=40, inverse=True), "Комиссии, логистика и услуги", "Все комиссии, логистика, эквайринг и другие удержания Ozon за период.", percent=ozon_fees_share, percent_label="от продаж после возвратов"),
+        _card("ozon_fees", "Расходы Ozon", current["ozon_fees"] if finance_ready else None, "₽", "neutral" if not finance_ready else traffic_light(ozon_fees_share, good=25, warning=40, inverse=True), "Комиссии, логистика и услуги", "Комиссии, логистика, эквайринг и услуги Ozon. Займы и факторинг сюда не входят.", percent=ozon_fees_share, percent_label="от продаж после возвратов"),
         _card("cogs", "Себестоимость продаж", current["cogs_gross"] if costs_ready else None, "₽", (traffic_light(cogs_share, good=50, warning=70, inverse=True) if costs_complete else "yellow") if costs_ready else "neutral", costs_note, "Закупочная стоимость с НДС плюс дополнительные затраты без НДС, с учётом возвратов.", percent=cogs_share, percent_label="от продаж после возвратов"),
         _card("net_profit", "Чистая прибыль", net_profit, "₽", (traffic_light(net_margin, good=15, warning=5) if costs_complete else "yellow") if net_profit is not None else "neutral", profit_note, "Расчётная прибыль после расходов Ozon, НДС и налога на прибыль. При неполной себестоимости помечается как предварительная.", percent=net_margin, percent_label="чистая рентабельность"),
         _card("buyout_rate", "Процент выкупа", buyout_rate, "%", traffic_light(buyout_rate, good=80, warning=60), f"Осталось у покупателей: {net_sold_units} из {gross_sold_units} доставленных", "Доставленные товары за вычетом возвратов относительно всех доставленных единиц."),
@@ -841,6 +1021,15 @@ def dashboard(days: int = 30, date_from: date | None = None, date_to: date | Non
                 "share_percent": round(current[key] / net_sales_gross * 100, 1) if net_sales_gross > 0 else None,
             }
             for key in EXPENSE_KEYS
+        ],
+        "financing": [
+            {
+                "key": key,
+                "name": {"loan": "Займы Ozon", "factoring": "Факторинг"}[key],
+                "value": round(current[key], 2),
+                "direction": "inflow" if current[key] > 0 else "outflow" if current[key] < 0 else "none",
+            }
+            for key in FINANCING_KEYS
         ],
         "tax_policy": {"adult_vat_rate": 22, "kids_vat_rate": 10, "income_tax_rate": settings.income_tax_rate},
         "categories": categories,
