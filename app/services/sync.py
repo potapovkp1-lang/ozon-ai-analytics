@@ -202,7 +202,8 @@ async def sync_inventory_source(client: OzonSellerClient) -> None:
 async def sync_finance_source(client: OzonSellerClient, today: date) -> None:
     desired_from = today - timedelta(days=92)
     earliest = finance_earliest_day()
-    finance_from = desired_from if earliest is None or earliest > desired_from or finance_needs_sku_backfill() else today - timedelta(days=14)
+    full_backfill = earliest is None or earliest > desired_from or finance_needs_sku_backfill()
+    finance_from = desired_from if full_backfill else today - timedelta(days=14)
     finance_to = today - timedelta(days=1)
     set_sync_state("finance", "syncing", "Загружаем продажи, возвраты и расходы Ozon")
     try:
@@ -212,6 +213,8 @@ async def sync_finance_source(client: OzonSellerClient, today: date) -> None:
         logger.warning("Ozon finance sync deferred: %s", type(error).__name__)
         return
     set_sync_state("finance", "ready", f"Финансовые операции обновлены: {operation_count}", success=True)
+    if full_backfill:
+        set_sync_state("finance_units_v2", "ready", "Продажи и возвраты пересчитаны без повторов", success=True)
 
 
 async def sync_finance_data(client: OzonSellerClient, date_from: date, date_to: date) -> int:
