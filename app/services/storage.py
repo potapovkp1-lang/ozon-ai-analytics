@@ -28,10 +28,14 @@ def initialise() -> None:
                 day DATE PRIMARY KEY,
                 revenue NUMERIC(14, 2) NOT NULL DEFAULT 0,
                 ordered_units INTEGER NOT NULL DEFAULT 0,
+                delivered_units INTEGER NOT NULL DEFAULT 0,
+                returned_units INTEGER NOT NULL DEFAULT 0,
                 canceled_units INTEGER NOT NULL DEFAULT 0,
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
             )
         """)
+        cur.execute("ALTER TABLE daily_metrics ADD COLUMN IF NOT EXISTS delivered_units INTEGER NOT NULL DEFAULT 0")
+        cur.execute("ALTER TABLE daily_metrics ADD COLUMN IF NOT EXISTS returned_units INTEGER NOT NULL DEFAULT 0")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS daily_finance (
                 day DATE PRIMARY KEY,
@@ -76,10 +80,14 @@ def initialise() -> None:
                 product_name TEXT NOT NULL DEFAULT '',
                 ordered_amount NUMERIC(14, 2) NOT NULL DEFAULT 0,
                 ordered_units INTEGER NOT NULL DEFAULT 0,
+                delivered_units INTEGER NOT NULL DEFAULT 0,
+                returned_units INTEGER NOT NULL DEFAULT 0,
                 canceled_units INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (day, ozon_sku)
             )
         """)
+        cur.execute("ALTER TABLE analytics_sku_daily ADD COLUMN IF NOT EXISTS delivered_units INTEGER NOT NULL DEFAULT 0")
+        cur.execute("ALTER TABLE analytics_sku_daily ADD COLUMN IF NOT EXISTS returned_units INTEGER NOT NULL DEFAULT 0")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS sku_costs (
                 ozon_sku TEXT NOT NULL,
@@ -131,17 +139,28 @@ def initialise() -> None:
         conn.commit()
 
 
-def upsert_daily_metric(day: date, revenue: float, ordered_units: int, canceled_units: int) -> None:
+def upsert_daily_metric(
+    day: date,
+    revenue: float,
+    ordered_units: int,
+    delivered_units: int,
+    returned_units: int,
+    canceled_units: int,
+) -> None:
     with connection() as conn, conn.cursor() as cur:
         cur.execute("""
-            INSERT INTO daily_metrics (day, revenue, ordered_units, canceled_units, updated_at)
-            VALUES (%s, %s, %s, %s, now())
+            INSERT INTO daily_metrics (
+                day, revenue, ordered_units, delivered_units, returned_units,
+                canceled_units, updated_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, now())
             ON CONFLICT (day) DO UPDATE SET
               revenue = EXCLUDED.revenue,
               ordered_units = EXCLUDED.ordered_units,
+              delivered_units = EXCLUDED.delivered_units,
+              returned_units = EXCLUDED.returned_units,
               canceled_units = EXCLUDED.canceled_units,
               updated_at = now()
-        """, (day, revenue, ordered_units, canceled_units))
+        """, (day, revenue, ordered_units, delivered_units, returned_units, canceled_units))
         conn.commit()
 
 
@@ -199,11 +218,13 @@ def replace_analytics_sku_period(date_from: date, date_to: date, rows: Iterable[
         if prepared:
             cur.executemany("""
                 INSERT INTO analytics_sku_daily (
-                    day, ozon_sku, product_name, ordered_amount, ordered_units, canceled_units
-                ) VALUES (%s, %s, %s, %s, %s, %s)
+                    day, ozon_sku, product_name, ordered_amount, ordered_units,
+                    delivered_units, returned_units, canceled_units
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """, [(
                 row["day"], row["ozon_sku"], row.get("product_name", ""),
                 row.get("ordered_amount", 0), row.get("ordered_units", 0),
+                row.get("delivered_units", 0), row.get("returned_units", 0),
                 row.get("canceled_units", 0),
             ) for row in prepared])
         conn.commit()
@@ -353,6 +374,8 @@ def _period_rows(cur, date_from: date, date_to: date) -> list[dict]:
             COALESCE(m.day, f.day) AS day,
             COALESCE(m.revenue, 0)::float AS ordered_amount,
             COALESCE(m.ordered_units, 0) AS ordered_units,
+            COALESCE(m.delivered_units, 0) AS delivered_units,
+            COALESCE(m.returned_units, 0) AS analytics_returned_units,
             COALESCE(m.canceled_units, 0) AS canceled_units,
             COALESCE(f.sales_amount, 0)::float AS sales_amount,
             COALESCE(f.return_amount, 0)::float AS return_amount,
@@ -377,11 +400,22 @@ def _period_rows(cur, date_from: date, date_to: date) -> list[dict]:
 
 def _costs(cur, date_from: date, date_to: date) -> dict:
     cur.execute("""
-        WITH movements AS (
+        WITH analytics_available AS (
+            SELECT EXISTS (
+                SELECT 1 FROM analytics_sku_daily
+                WHERE day BETWEEN %s AND %s AND (delivered_units > 0 OR returned_units > 0)
+            ) AS present
+        ), movements AS (
+            SELECT day, ozon_sku, delivered_units AS sales_units,
+                   returned_units AS return_units,
+                   delivered_units - returned_units AS net_units
+            FROM analytics_sku_daily, analytics_available
+            WHERE day BETWEEN %s AND %s AND analytics_available.present
+            UNION ALL
             SELECT day, ozon_sku, sales_units, return_units,
                    sales_units - return_units AS net_units
-            FROM finance_sku_daily
-            WHERE day BETWEEN %s AND %s
+            FROM finance_sku_daily, analytics_available
+            WHERE day BETWEEN %s AND %s AND NOT analytics_available.present
         ), priced AS (
             SELECT m.*,
                    c.purchase_cost_with_vat::float AS purchase_gross,
@@ -413,7 +447,7 @@ def _costs(cur, date_from: date, date_to: date) -> dict:
                 ABS(net_units) * sale_vat_rate / (100 + sale_vat_rate) ELSE 0 END), 0)::float AS weighted_vat_fraction,
             COALESCE(SUM(CASE WHEN purchase_gross IS NOT NULL THEN ABS(net_units) ELSE 0 END), 0)::int AS weighted_units
         FROM priced
-    """, (date_from, date_to))
+    """, (date_from, date_to, date_from, date_to, date_from, date_to))
     return cur.fetchone()
 
 
@@ -423,6 +457,8 @@ def _snapshot(cur, date_from: date, date_to: date) -> dict:
     totals = {
         "ordered_amount": sum(row["ordered_amount"] for row in rows),
         "ordered_units": sum(row["ordered_units"] for row in rows),
+        "delivered_units": sum(row["delivered_units"] for row in rows),
+        "analytics_returned_units": sum(row["analytics_returned_units"] for row in rows),
         "canceled_units": sum(row["canceled_units"] for row in rows),
         "sales_amount": sum(row["sales_amount"] for row in rows),
         "sales_units": sum(row["sales_units"] for row in rows),
@@ -442,7 +478,9 @@ def _category_breakdown(cur, date_from: date, date_to: date) -> tuple[list[dict]
         WITH orders AS (
             SELECT ozon_sku, MAX(product_name) AS product_name,
                    SUM(ordered_amount)::float AS ordered_amount,
-                   SUM(ordered_units)::int AS ordered_units
+                   SUM(ordered_units)::int AS ordered_units,
+                   SUM(delivered_units)::int AS delivered_units,
+                   SUM(returned_units)::int AS returned_units
             FROM analytics_sku_daily WHERE day BETWEEN %s AND %s
             GROUP BY ozon_sku
         ), finance AS (
@@ -451,28 +489,14 @@ def _category_breakdown(cur, date_from: date, date_to: date) -> tuple[list[dict]
                    SUM(f.return_amount)::float AS return_amount,
                    SUM(f.ozon_fees)::float AS ozon_fees,
                    SUM(f.sales_units)::int AS sales_units,
-                   SUM(f.return_units)::int AS return_units,
-                   SUM(CASE WHEN c.purchase_cost_with_vat IS NOT NULL THEN
-                       (f.sales_units - f.return_units) *
-                       (c.purchase_cost_with_vat + c.extra_cost_without_vat) ELSE 0 END)::float AS cogs_gross,
-                   SUM(CASE WHEN c.purchase_cost_with_vat IS NOT NULL THEN
-                       (f.sales_units - f.return_units) *
-                       (c.purchase_cost_with_vat / (1 + c.purchase_vat_rate / 100) + c.extra_cost_without_vat) ELSE 0 END)::float AS cogs_net,
-                   SUM(ABS(f.sales_units) + ABS(f.return_units))::int AS movement_units,
-                   SUM(CASE WHEN c.purchase_cost_with_vat IS NOT NULL THEN
-                       ABS(f.sales_units) + ABS(f.return_units) ELSE 0 END)::int AS priced_units
+                   SUM(f.return_units)::int AS return_units
             FROM finance_sku_daily f
-            LEFT JOIN LATERAL (
-                SELECT * FROM sku_costs c
-                WHERE c.ozon_sku = f.ozon_sku
-                ORDER BY
-                    CASE WHEN c.valid_from <= f.day THEN 0 ELSE 1 END,
-                    CASE WHEN c.valid_from <= f.day THEN c.valid_from END DESC,
-                    CASE WHEN c.valid_from > f.day THEN c.valid_from END ASC
-                LIMIT 1
-            ) c ON TRUE
             WHERE f.day BETWEEN %s AND %s
             GROUP BY f.ozon_sku
+        ), analytics_available AS (
+            SELECT EXISTS (
+                SELECT 1 FROM orders WHERE delivered_units > 0 OR returned_units > 0
+            ) AS present
         ), keys AS (
             SELECT ozon_sku FROM orders UNION SELECT ozon_sku FROM finance
         )
@@ -483,18 +507,20 @@ def _category_breakdown(cur, date_from: date, date_to: date) -> tuple[list[dict]
                COALESCE(f.sales_amount, 0)::float AS sales_amount,
                COALESCE(f.return_amount, 0)::float AS return_amount,
                COALESCE(f.ozon_fees, 0)::float AS ozon_fees,
-               COALESCE(f.sales_units, 0)::int AS sales_units,
-               COALESCE(f.return_units, 0)::int AS return_units,
-               COALESCE(f.cogs_gross, 0)::float AS cogs_gross,
-               COALESCE(f.cogs_net, 0)::float AS cogs_net,
-               COALESCE(f.movement_units, 0)::int AS movement_units,
-               COALESCE(f.priced_units, 0)::int AS priced_units,
-               c.product_group, c.sale_vat_rate::float AS sale_vat_rate
+               CASE WHEN available.present THEN COALESCE(o.delivered_units, 0) ELSE COALESCE(f.sales_units, 0) END::int AS sales_units,
+               CASE WHEN available.present THEN COALESCE(o.returned_units, 0) ELSE COALESCE(f.return_units, 0) END::int AS return_units,
+               c.product_group, c.sale_vat_rate::float AS sale_vat_rate,
+               c.purchase_cost_with_vat::float AS purchase_gross,
+               c.purchase_vat_rate::float AS purchase_vat_rate,
+               c.extra_cost_without_vat::float AS extra_cost_net
         FROM keys k
+        CROSS JOIN analytics_available available
         LEFT JOIN orders o ON o.ozon_sku = k.ozon_sku
         LEFT JOIN finance f ON f.ozon_sku = k.ozon_sku
         LEFT JOIN LATERAL (
-            SELECT product_group, sale_vat_rate FROM sku_costs c
+            SELECT product_group, sale_vat_rate, purchase_cost_with_vat,
+                   purchase_vat_rate, extra_cost_without_vat
+            FROM sku_costs c
             WHERE c.ozon_sku = k.ozon_sku
             ORDER BY
                 CASE WHEN c.valid_from <= %s THEN 0 ELSE 1 END,
@@ -518,10 +544,18 @@ def _category_breakdown(cur, date_from: date, date_to: date) -> tuple[list[dict]
         target = groups[key]
         for field in (
             "ordered_amount", "ordered_units", "sales_amount", "return_amount",
-            "sales_units", "return_units", "ozon_fees", "cogs_gross", "cogs_net",
-            "movement_units", "priced_units",
+            "sales_units", "return_units", "ozon_fees",
         ):
             target[field] += row[field]
+        movement_units = abs(row["sales_units"]) + abs(row["return_units"])
+        target["movement_units"] += movement_units
+        if row["purchase_gross"] is not None:
+            net_units = row["sales_units"] - row["return_units"]
+            target["priced_units"] += movement_units
+            target["cogs_gross"] += net_units * (row["purchase_gross"] + row["extra_cost_net"])
+            target["cogs_net"] += net_units * (
+                row["purchase_gross"] / (1 + row["purchase_vat_rate"] / 100) + row["extra_cost_net"]
+            )
         rate = row["sale_vat_rate"] if row["sale_vat_rate"] is not None else (10.0 if key == "kids" else 22.0)
         target["output_vat"] += max(row["sales_amount"] - row["return_amount"], 0) * rate / (100 + rate)
 
@@ -688,6 +722,7 @@ def dashboard(days: int = 30, date_from: date | None = None, date_to: date | Non
     costs_ready = movement_units > 0 and coverage >= 95.0
     costs_complete = coverage >= 99.9
     finance_ready = any(row["finance_present"] for row in current["rows"])
+    analytics_units_ready = current["delivered_units"] > 0
 
     net_sales_gross = current["sales_amount"] - current["return_amount"]
     previous_net_sales = previous["sales_amount"] - previous["return_amount"]
@@ -711,9 +746,14 @@ def dashboard(days: int = 30, date_from: date | None = None, date_to: date | Non
         if sales_net_of_vat:
             net_margin = net_profit / sales_net_of_vat * 100
 
-    net_sold_units = max(0, current["sales_units"] - current["return_units"])
-    buyout_rate = buyout_percent(current["ordered_units"], current["sales_units"], current["return_units"])
-    return_rate = current["return_units"] / current["sales_units"] * 100 if current["sales_units"] else 0.0
+    gross_sold_units = current["delivered_units"] if analytics_units_ready else current["sales_units"]
+    returned_units = current["analytics_returned_units"] if analytics_units_ready else current["return_units"]
+    previous_gross_sold_units = previous["delivered_units"] if previous["delivered_units"] > 0 else previous["sales_units"]
+    previous_returned_units = previous["analytics_returned_units"] if previous["delivered_units"] > 0 else previous["return_units"]
+    net_sold_units = max(0, gross_sold_units - returned_units)
+    previous_net_sold_units = max(0, previous_gross_sold_units - previous_returned_units)
+    buyout_rate = buyout_percent(current["ordered_units"], gross_sold_units, returned_units)
+    return_rate = returned_units / gross_sold_units * 100 if gross_sold_units else 0.0
     cogs_share = current["cogs_gross"] / net_sales_gross * 100 if net_sales_gross > 0 and costs_ready else None
     return_amount_share = current["return_amount"] / current["sales_amount"] * 100 if current["sales_amount"] else 0.0
     ozon_fees_share = current["ozon_fees"] / net_sales_gross * 100 if net_sales_gross > 0 and finance_ready else None
@@ -730,14 +770,14 @@ def dashboard(days: int = 30, date_from: date | None = None, date_to: date | Non
     )
 
     return_amount_status = "red" if previous["return_amount"] == 0 and current["return_amount"] > 0 else trend_status(current["return_amount"], previous["return_amount"], inverse=True)
-    return_units_status = "red" if previous["return_units"] == 0 and current["return_units"] > 0 else trend_status(current["return_units"], previous["return_units"], inverse=True)
+    return_units_status = "red" if previous_returned_units == 0 and returned_units > 0 else trend_status(returned_units, previous_returned_units, inverse=True)
     kpis = [
         _card("ordered_amount", "Заказано на сумму", current["ordered_amount"], "₽", trend_status(current["ordered_amount"], previous["ordered_amount"]), _delta_note(current["ordered_amount"], previous["ordered_amount"], period_note), "Стоимость всех оформленных заказов за выбранный период.", percent=percent_change(current["ordered_amount"], previous["ordered_amount"]), percent_label="к прошлому периоду"),
         _card("ordered_units", "Заказано товаров", current["ordered_units"], "шт.", trend_status(current["ordered_units"], previous["ordered_units"]), _delta_note(current["ordered_units"], previous["ordered_units"], period_note), "Количество заказанных единиц, включая те, что позже могли отменить или вернуть."),
         _card("sales_amount", "Продажи", current["sales_amount"] if finance_ready else None, "₽", trend_status(current["sales_amount"], previous["sales_amount"]) if finance_ready else "neutral", _delta_note(current["sales_amount"], previous["sales_amount"], "Финансовые операции Ozon"), "Начисления за фактически реализованные товары до вычета возвратов.", percent=percent_change(current["sales_amount"], previous["sales_amount"]), percent_label="к прошлому периоду"),
-        _card("sales_units", "Продано товаров", current["sales_units"] if finance_ready else None, "шт.", trend_status(current["sales_units"], previous["sales_units"]) if finance_ready else "neutral", _delta_note(current["sales_units"], previous["sales_units"], "По финансовым операциям"), "Количество товаров в операциях реализации Ozon."),
+        _card("sales_units", "Выкуплено товаров", net_sold_units if analytics_units_ready or finance_ready else None, "шт.", trend_status(net_sold_units, previous_net_sold_units) if analytics_units_ready or finance_ready else "neutral", _delta_note(net_sold_units, previous_net_sold_units, "По данным Ozon Analytics"), "Доставленные товары за вычетом возвратов. Используется в расчёте процента выкупа."),
         _card("return_amount", "Возвраты", current["return_amount"] if finance_ready else None, "₽", return_amount_status if finance_ready else "neutral", _delta_note(current["return_amount"], previous["return_amount"], f"Доля возвратов {return_rate:.1f}%"), "Сумма возвратов и сторнированных начислений. Чем меньше, тем лучше.", percent=return_amount_share if finance_ready else None, percent_label="от продаж"),
-        _card("return_units", "Возвращено товаров", current["return_units"] if finance_ready else None, "шт.", return_units_status if finance_ready else "neutral", _delta_note(current["return_units"], previous["return_units"], f"Доля возвратов {return_rate:.1f}%"), "Количество товаров в операциях возврата Ozon."),
+        _card("return_units", "Возвращено товаров", returned_units if analytics_units_ready or finance_ready else None, "шт.", return_units_status if analytics_units_ready or finance_ready else "neutral", _delta_note(returned_units, previous_returned_units, f"Доля возвратов {return_rate:.1f}%"), "Количество возвращённых единиц из единого отчёта Ozon Analytics."),
         _card("ozon_fees", "Расходы Ozon", current["ozon_fees"] if finance_ready else None, "₽", "neutral" if not finance_ready else traffic_light(ozon_fees_share, good=25, warning=40, inverse=True), "Комиссии, логистика и услуги", "Все комиссии, логистика, эквайринг и другие удержания Ozon за период.", percent=ozon_fees_share, percent_label="от продаж после возвратов"),
         _card("cogs", "Себестоимость продаж", current["cogs_gross"] if costs_ready else None, "₽", (traffic_light(cogs_share, good=50, warning=70, inverse=True) if costs_complete else "yellow") if costs_ready else "neutral", costs_note, "Закупочная стоимость с НДС плюс дополнительные затраты без НДС, с учётом возвратов.", percent=cogs_share, percent_label="от продаж после возвратов"),
         _card("net_profit", "Чистая прибыль", net_profit, "₽", (traffic_light(net_margin, good=15, warning=5) if costs_complete else "yellow") if net_profit is not None else "neutral", profit_note, "Расчётная прибыль после расходов Ozon, НДС и налога на прибыль. При неполной себестоимости помечается как предварительная.", percent=net_margin, percent_label="чистая рентабельность"),
@@ -808,6 +848,7 @@ def dashboard(days: int = 30, date_from: date | None = None, date_to: date | Non
         "warehouses": warehouses,
         "data_quality": {
             "finance_ready": finance_ready,
+            "units_source": "analytics" if analytics_units_ready else "finance_fallback",
             "cost_coverage_percent": coverage,
             "missing_cost_units": missing_cost_units,
             "tax_estimate": True,
