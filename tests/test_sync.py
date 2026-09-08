@@ -2,7 +2,7 @@ from datetime import date
 import asyncio
 
 from app.clients.ozon_seller import OzonSellerClient
-from app.services.sync import finance_chunks, metric_number, report_day
+from app.services.sync import finance_chunks, metric_number, product_catalog_row, report_day
 
 
 def test_parse_report_day_from_ozon_dimension():
@@ -28,6 +28,24 @@ def test_daily_analytics_requests_day_dimensions():
     assert "dimension" not in captured
 
 
+def test_product_catalog_row_extracts_article_size_and_barcode():
+    row = product_catalog_row({
+        "sku": 123456,
+        "offer_id": "ART-42",
+        "name": "Брюки мужские",
+        "barcodes": ["4600000000001"],
+        "attributes": [
+            {"name": "Размер", "values": [{"value": "42"}]},
+            {"name": "Размер упаковки", "values": [{"value": "30 × 20"}]},
+        ],
+    })
+    assert row == {
+        "ozon_sku": "123456", "offer_id": "ART-42",
+        "product_name": "Брюки мужские", "size": "42",
+        "barcode": "4600000000001",
+    }
+
+
 def test_sku_analytics_requests_day_and_sku_dimensions():
     captured = {}
     client = OzonSellerClient()
@@ -41,7 +59,11 @@ def test_sku_analytics_requests_day_and_sku_dimensions():
     asyncio.run(client.sku_analytics(date(2026, 8, 1), date(2026, 8, 2)))
     assert captured["path"] == "/v1/analytics/data"
     assert captured["dimensions"] == ["day", "sku"]
-    assert captured["metrics"] == ["revenue", "ordered_units", "delivered_units", "returns", "cancellations"]
+    assert captured["metrics"][:5] == ["revenue", "ordered_units", "delivered_units", "returns", "cancellations"]
+    assert "hits_view_search" in captured["metrics"]
+    assert "hits_view_pdp" in captured["metrics"]
+    assert "hits_tocart_pdp" in captured["metrics"]
+    assert len(captured["metrics"]) == 14
 
 
 def test_finance_transactions_request_all_operations():
