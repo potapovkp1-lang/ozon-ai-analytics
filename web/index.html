@@ -321,10 +321,11 @@ function funnelCell(value, good, warning, empty='—') {
 }
 function renderPhoto(data) {
   const totals=data.totals||{};
+  const noTraffic=!data.data_available;
   document.getElementById('photoSummary').innerHTML=[
-    ['Просмотры карточек',number(totals.views),'За выбранный период'],
-    ['CTR',percent(totals.ctr),'Переходы из поиска и каталога'],
-    ['Карточка → корзина',percent(totals.card_to_cart),'Добавили после просмотра'],
+    ['Просмотры карточек',noTraffic?'Нет данных':number(totals.views),noTraffic?'Нужен доступ Ozon Premium':'За выбранный период'],
+    ['CTR',percent(totals.ctr),noTraffic?'Ozon не передал метрику':'Переходы из поиска и каталога'],
+    ['Карточка → корзина',percent(totals.card_to_cart),noTraffic?'Ozon не передал метрику':'Добавили после просмотра'],
     ['Заказ → выкуп',percent(totals.order_to_buyout),`${number(totals.retained_units)} из ${number(totals.ordered_units)} шт.`],
   ].map(([label,value,note])=>`<div><span>${label}</span><b>${value}</b><small>${note}</small></div>`).join('');
   const body=document.getElementById('photoRows');
@@ -341,7 +342,7 @@ function renderPhoto(data) {
   </tr>`).join('') : '<tr><td colspan="10" class="table-empty">По выбранному артикулу и периоду данных нет.</td></tr>';
   const status=document.getElementById('photoStatus');
   status.className=`photo-status ${data.data_available?'ready':'attention'}`;
-  status.textContent=data.data_available ? `Показано товаров: ${data.rows.length} · ${new Date(data.period.date_from+'T00:00:00').toLocaleDateString('ru-RU')}–${new Date(data.period.date_to+'T00:00:00').toLocaleDateString('ru-RU')}` : 'Расширенные показатели появятся после синхронизации Ozon Analytics.';
+  status.textContent=data.data_available ? `Показано товаров: ${data.rows.length} · ${new Date(data.period.date_from+'T00:00:00').toLocaleDateString('ru-RU')}–${new Date(data.period.date_to+'T00:00:00').toLocaleDateString('ru-RU')}` : (data.source_status?.detail||'Ozon не передал расширенную аналитику за выбранный период.');
 }
 async function loadPhotoAnalytics(query=currentPhotoQuery) {
   currentPhotoQuery=query;
