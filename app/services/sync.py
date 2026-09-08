@@ -98,8 +98,10 @@ async def sync_analytics_source(client: OzonSellerClient, today: date) -> None:
             day = report_day(dimensions[0])
             revenue = metric_number(metrics[0]) if len(metrics) > 0 else 0
             ordered_units = int(metric_number(metrics[1])) if len(metrics) > 1 else 0
-            cancellations = int(metric_number(metrics[2])) if len(metrics) > 2 else 0
-            upsert_daily_metric(day, revenue, ordered_units, cancellations)
+            delivered_units = int(metric_number(metrics[2])) if len(metrics) > 2 else 0
+            returns = int(metric_number(metrics[3])) if len(metrics) > 3 else 0
+            cancellations = int(metric_number(metrics[4])) if len(metrics) > 4 else 0
+            upsert_daily_metric(day, revenue, ordered_units, delivered_units, returns, cancellations)
             imported += 1
         except (TypeError, ValueError, IndexError):
             skipped += 1
@@ -139,7 +141,9 @@ async def sync_sku_analytics(client: OzonSellerClient, date_from: date, date_to:
                     "product_name": name,
                     "ordered_amount": metric_number(metrics[0]) if len(metrics) > 0 else 0,
                     "ordered_units": int(metric_number(metrics[1])) if len(metrics) > 1 else 0,
-                    "canceled_units": int(metric_number(metrics[2])) if len(metrics) > 2 else 0,
+                    "delivered_units": int(metric_number(metrics[2])) if len(metrics) > 2 else 0,
+                    "returned_units": int(metric_number(metrics[3])) if len(metrics) > 3 else 0,
+                    "canceled_units": int(metric_number(metrics[4])) if len(metrics) > 4 else 0,
                 })
             except (TypeError, ValueError, IndexError):
                 continue
