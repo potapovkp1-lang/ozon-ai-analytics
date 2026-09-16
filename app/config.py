@@ -9,6 +9,11 @@ class Settings(BaseSettings):
     ozon_performance_client_id: str = ""
     ozon_performance_client_secret: str = ""
     gpt_action_token: str = ""
+    mcp_allowed_hosts: str = (
+        "ozon-ai-analytics-production.up.railway.app,"
+        "ozon-ai-analytics-production.up.railway.app:*,"
+        "localhost:*,127.0.0.1:*"
+    )
     dashboard_username: str = ""
     dashboard_password: str = ""
     database_url: str = ""
