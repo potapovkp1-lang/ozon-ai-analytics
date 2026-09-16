@@ -13,6 +13,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
+from app.mcp_server import mcp_app, mcp_server
 from app.services.costs import parse_cost_csv, template_csv
 from app.services.sync import sync_operational_data
 from app.services.storage import (
@@ -50,13 +51,16 @@ async def lifespan(_: FastAPI):
         initialise()
     scheduler.add_job(sync_operational_data, "interval", hours=1, id="operational-sync", replace_existing=True)
     scheduler.start()
-    if settings.sync_enabled:
-        asyncio.create_task(sync_operational_data())
-    yield
-    scheduler.shutdown(wait=False)
+    try:
+        async with mcp_server.session_manager.run():
+            if settings.sync_enabled:
+                asyncio.create_task(sync_operational_data())
+            yield
+    finally:
+        scheduler.shutdown(wait=False)
 
 
-app = FastAPI(title="Ozon AI Analytics API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="Ozon AI Analytics API", version="0.2.0", lifespan=lifespan)
 app.mount("/assets", StaticFiles(directory=ROOT / "web"), name="assets")
 
 
@@ -179,3 +183,6 @@ async def costs_import(request: Request):
     except ValueError as error:
         raise HTTPException(422, str(error)) from error
     return {"status": "ok", "imported": imported}
+
+
+app.mount("/mcp", mcp_app, name="mcp")
